@@ -70,7 +70,72 @@ nix fmt && git diff --exit-code &&
   evaluation never builds anything first.
   - `FuryKernel.Metal.Target`: the GPU families, `AppleGPU9` (family 9) so
     far, as `Target` instances.
-- `test/`: the test suite, tasty.
+  - `FuryKernel.Metal.Msl`: `metal`, the backend: checked kernels of
+    distinct names as one MSL 4.1 translation unit (two of one name are
+    refused, as the CPU backend refuses them), which a runtime compiles as
+    its options say (`loweredOptions`: MSL 4.1, macOS 27's, the floor;
+    `Strict` arithmetic), and their launch tables. The source's prelude
+    refuses MSL before 4.1 (`#if __METAL_VERSION__ < 410`, an `#error`),
+    sets its own math mode (`#pragma METAL fp math_mode(safe)`) and, after
+    it, as safe math mode sets the contract on,
+    `#pragma METAL fp contract(off)`: no multiplication and addition
+    contract within a statement, and a multiply-add is fused only where a
+    kernel writes `fmaE`, as `metal::fma`. Each parameter struct's size
+    and its fields' offsets are asserted against the ABI's
+    (`static_assert`). The IR leaves binary32 subnormals to the target, and
+    MSL 4.1's section 8.1 lets them be flushed to zero; on the M3 Max,
+    float arithmetic flushes subnormal operands and results to zeros of
+    their signs, comparisons see them as zeros, and so do fmin, fmax and
+    select's condition, which return operands unflushed, simd_max over
+    subnormal lanes gives lane 0's, loads, stores, bfloat's widening and
+    tanh keep the bits, and half keeps its subnormals. A converted NaN is
+    the target's too: on the M3 Max, bfloat's widening keeps a signalling
+    NaN signalling, half's widening and float's narrowing give the
+    canonical NaN, and no NaN becomes an infinity. Library calls are
+    fully qualified and generated names start with `fk_`; floats print
+    exactly; transcendental functions are `metal::precise::`, so results
+    don't depend on the compile options' math mode, within the bounds of
+    MSL 4.1's Table 8.1 (exp and log 4 ulp, tanh 5, sqrt, rsqrt and fma
+    correctly rounded); binary16 math and division go through binary32,
+    rounding once more. Buffers bind from
+    0 in declaration order, the parameter struct after them.
+    Every threadgroup array is declared `alignas(16)`, so Metal starts each
+    at a multiple of 16 bytes; it allocates at most each one's size rounded
+    up to 16, summed, the launch table's `lkTgMemory`: as observed on the
+    M3 Max, that where the kernel uses every array, less where it doesn't,
+    Metal dropping the arrays a kernel doesn't use and shrinking some indexed
+    by constants. i32 addition, subtraction, multiplication, negation and
+    magnitude go through uint, so that they wrap as the IR defines them,
+    the magnitude in `fk_abs_i32`, which takes its operand once. half's
+    negation and magnitude go through its bits: Metal's give a NaN the
+    canonical one (observed on an M3 Max, AppleGPU9). float's magnitude
+    goes through its bits too: macOS 27.2's compiler drops `metal::abs`
+    where it takes the operand for non-negative (`abs(rsqrt(-0))` came out
+    `-inf`).
+    Float minima and maxima, and the SIMD-group reductions over them, are
+    Metal's own (`metal::precise::fmin` and `metal::precise::fmax` in f32,
+    whatever the compile options; `metal::fmin` and `metal::fmax` in f16,
+    which has no precise overloads, held by the source's math mode and the
+    lowered options; `metal::simd_min`, `metal::simd_max`): on the M3 Max
+    fmin and fmax ignore a NaN operand, as the IR's minimumNumber does.
+    Which of operands that compare equal (-0 and +0) or of two NaNs comes
+    out is the target's choice, as the IR leaves it: MSL's section 6.6
+    gives the first of equal operands, a call alone in a kernel gave the
+    second on the M3 Max, and the compiler took `fmin(a, b)` and
+    `fmin(b, a)` in one kernel for one call. Of
+    the reductions, only simd_max over subnormal lanes is recorded (lane
+    0's); what they choose among equal lanes, -0 and +0, or NaNs isn't.
+    SIMD-group sums are `metal::simd_sum`, which adds pairwise, neighbours
+    first, as the IR orders them (bit for bit on the M3 Max, in f32 away
+    from binary32 subnormals, which it flushes, and in f16). And
+    and Or evaluate both operands (`bool(int(a) & int(b))`); an integer
+    narrows clamped with `metal::clamp` or `metal::min`, or wrapped
+    through `uint` and `as_type`.
+    It refuses what it doesn't print yet, a `Target` finding for each:
+    packs, tables, fragments, packs stored to threadgroup arrays, SIMD-group
+    barriers, fragments widened into f32 and fragments' rows scaled.
+- `test/`: the test suite, tasty: the limits of the targets, and golden
+  MSL, an RMSNorm kernel's launch table with it.
 - `nix/`: `package.nix` (the library, built with GHC 9.12 under
   `-Werror`), `checks.nix` (the build with its tests, hlint,
   cabal2nix-in-sync and `reuse lint`), `devshell.nix` (`checks.devshell`

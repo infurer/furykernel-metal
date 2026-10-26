@@ -46,19 +46,25 @@ library
   hs-source-dirs: src
   exposed-modules:
     FuryKernel.Metal
+    FuryKernel.Metal.Msl
     FuryKernel.Metal.Target
 
   build-depends:
     base >=4.21 && <5,
+    containers >=0.7 && <0.8,
     furykernel >=0.2 && <0.3,
     text >=2.1 && <2.2,
+    transformers >=0.6 && <0.7,
 
 test-suite furykernel-metal-test
   import: warnings, extensions
   type: exitcode-stdio-1.0
   hs-source-dirs: test
   main-is: Main.hs
-  other-modules: Test.FuryKernel.Metal.TargetTest
+  other-modules:
+    Test.FuryKernel.Metal.MslTest
+    Test.FuryKernel.Metal.TargetTest
+
   ghc-options:
     -threaded
     -rtsopts
@@ -70,3 +76,4 @@ test-suite furykernel-metal-test
     furykernel-metal,
     tasty >=1.5 && <1.6,
     tasty-hunit >=0.10 && <0.11,
+    text,
