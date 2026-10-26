@@ -97,8 +97,11 @@ nix fmt && git diff --exit-code &&
     don't depend on the compile options' math mode, within the bounds of
     MSL 4.1's Table 8.1 (exp and log 4 ulp, tanh 5, sqrt, rsqrt and fma
     correctly rounded); binary16 math and division go through binary32,
-    rounding once more. Buffers bind from
-    0 in declaration order, the parameter struct after them.
+    rounding once more. A pack is one
+    `ushort`, `ushort2` (two 16-bit elements, which a `uint` would alias),
+    `uint`, `uint2` or `uint4` load or store through the
+    buffer's pointer, taken apart and put together with `as_type`. Buffers
+    bind from 0 in declaration order, the parameter struct after them.
     Every threadgroup array is declared `alignas(16)`, so Metal starts each
     at a multiple of 16 bytes; it allocates at most each one's size rounded
     up to 16, summed, the launch table's `lkTgMemory`: as observed on the
@@ -132,10 +135,11 @@ nix fmt && git diff --exit-code &&
     narrows clamped with `metal::clamp` or `metal::min`, or wrapped
     through `uint` and `as_type`.
     It refuses what it doesn't print yet, a `Target` finding for each:
-    packs, tables, fragments, packs stored to threadgroup arrays, SIMD-group
+    tables, fragments, packs stored to threadgroup arrays, SIMD-group
     barriers, fragments widened into f32 and fragments' rows scaled.
 - `test/`: the test suite, tasty: the limits of the targets, and golden
-  MSL, an RMSNorm kernel's launch table with it.
+  MSL, an RMSNorm kernel's launch table with it, packs through ushort,
+  ushort2, uint2 and uint4 included.
 - `nix/`: `package.nix` (the library, built with GHC 9.12 under
   `-Werror`), `checks.nix` (the build with its tests, hlint,
   cabal2nix-in-sync and `reuse lint`), `devshell.nix` (`checks.devshell`

@@ -1,7 +1,7 @@
 -- SPDX-FileCopyrightText: 2026 Mika Tammi
 -- SPDX-License-Identifier: BSD-3-Clause
 
--- | The MSL and launch table of an RMSNorm kernel, golden.
+-- | The MSL of an RMSNorm kernel and of packs, golden, and the RMSNorm kernel's launch table.
 module Test.FuryKernel.Metal.MslTest (tests) where
 
 import Data.Int (Int32, Int8)
@@ -104,6 +104,52 @@ tests =
           (Abi.abiHash t.lkAbi, t.lkIrHash) @?= (0xf6b391506eb56115, 0xf125231f37446950)
           t.lkGroups @?= EParam "rows"
         ts -> assertFailure ("tables: " <> show (length ts))
+    , testCase "packs of bf16: one uint4 each" $
+        body scalePacked
+          @?= Right
+            [ "    for (uint j = fk_thread.x; j < fk_p.packs; j += 64u) {"
+            , "        const uint4 fk_pack_v_0 = reinterpret_cast<device const uint4*>(x)[j];"
+            , "        const bfloat v_0 = as_type<bfloat2>(fk_pack_v_0.x).x;"
+            , "        const bfloat v_1 = as_type<bfloat2>(fk_pack_v_0.x).y;"
+            , "        const bfloat v_2 = as_type<bfloat2>(fk_pack_v_0.y).x;"
+            , "        const bfloat v_3 = as_type<bfloat2>(fk_pack_v_0.y).y;"
+            , "        const bfloat v_4 = as_type<bfloat2>(fk_pack_v_0.z).x;"
+            , "        const bfloat v_5 = as_type<bfloat2>(fk_pack_v_0.z).y;"
+            , "        const bfloat v_6 = as_type<bfloat2>(fk_pack_v_0.w).x;"
+            , "        const bfloat v_7 = as_type<bfloat2>(fk_pack_v_0.w).y;"
+            , "        reinterpret_cast<device fk_uint4*>(y)[j] = uint4(as_type<uint>(bfloat2(as_type<bfloat>(fk_bf16((static_cast<float>(v_0) * fk_p.s))), as_type<bfloat>(fk_bf16((static_cast<float>(v_1) * fk_p.s))))), as_type<uint>(bfloat2(as_type<bfloat>(fk_bf16((static_cast<float>(v_2) * fk_p.s))), as_type<bfloat>(fk_bf16((static_cast<float>(v_3) * fk_p.s))))), as_type<uint>(bfloat2(as_type<bfloat>(fk_bf16((static_cast<float>(v_4) * fk_p.s))), as_type<bfloat>(fk_bf16((static_cast<float>(v_5) * fk_p.s))))), as_type<uint>(bfloat2(as_type<bfloat>(fk_bf16((static_cast<float>(v_6) * fk_p.s))), as_type<bfloat>(fk_bf16((static_cast<float>(v_7) * fk_p.s))))));"
+            , "    }"
+            ]
+    , testCase "packs of other widths" $
+        body copies
+          @?= Right
+            [ "    const uint2 fk_pack_f_0 = reinterpret_cast<device const uint2*>(a)[fk_thread.x];"
+            , "    const float f_0 = as_type<float>(fk_pack_f_0.x);"
+            , "    const float f_1 = as_type<float>(fk_pack_f_0.y);"
+            , "    reinterpret_cast<device fk_uint2*>(b)[fk_thread.x] = uint2(as_type<uint>(f_0), as_type<uint>(f_1));"
+            , "    const uint4 fk_pack_u_0 = reinterpret_cast<device const uint4*>(c)[fk_thread.x];"
+            , "    const uchar u_0 = as_type<uchar4>(fk_pack_u_0.x).x;"
+            , "    const uchar u_1 = as_type<uchar4>(fk_pack_u_0.x).y;"
+            , "    const uchar u_2 = as_type<uchar4>(fk_pack_u_0.x).z;"
+            , "    const uchar u_3 = as_type<uchar4>(fk_pack_u_0.x).w;"
+            , "    const uchar u_4 = as_type<uchar4>(fk_pack_u_0.y).x;"
+            , "    const uchar u_5 = as_type<uchar4>(fk_pack_u_0.y).y;"
+            , "    const uchar u_6 = as_type<uchar4>(fk_pack_u_0.y).z;"
+            , "    const uchar u_7 = as_type<uchar4>(fk_pack_u_0.y).w;"
+            , "    const uchar u_8 = as_type<uchar4>(fk_pack_u_0.z).x;"
+            , "    const uchar u_9 = as_type<uchar4>(fk_pack_u_0.z).y;"
+            , "    const uchar u_10 = as_type<uchar4>(fk_pack_u_0.z).z;"
+            , "    const uchar u_11 = as_type<uchar4>(fk_pack_u_0.z).w;"
+            , "    const uchar u_12 = as_type<uchar4>(fk_pack_u_0.w).x;"
+            , "    const uchar u_13 = as_type<uchar4>(fk_pack_u_0.w).y;"
+            , "    const uchar u_14 = as_type<uchar4>(fk_pack_u_0.w).z;"
+            , "    const uchar u_15 = as_type<uchar4>(fk_pack_u_0.w).w;"
+            , "    reinterpret_cast<device fk_uint4*>(d)[fk_thread.x] = uint4(as_type<uint>(uchar4(u_0, u_1, u_2, u_3)), as_type<uint>(uchar4(u_4, u_5, u_6, u_7)), as_type<uint>(uchar4(u_8, u_9, u_10, u_11)), as_type<uint>(uchar4(u_12, u_13, u_14, u_15)));"
+            , "    const ushort fk_pack_h_0 = reinterpret_cast<device const ushort*>(c)[fk_thread.x];"
+            , "    const uchar h_0 = as_type<uchar2>(fk_pack_h_0).x;"
+            , "    const uchar h_1 = as_type<uchar2>(fk_pack_h_0).y;"
+            , "    reinterpret_cast<device fk_ushort*>(e)[fk_thread.x] = as_type<ushort>(uchar2(h_1, h_0));"
+            ]
     , testCase "i32 arithmetic through uint, wrapping as the IR defines it" $
         body ints
           @?= Right
@@ -137,7 +183,7 @@ tests =
             , "    }"
             ]
     , testCase "what it doesn't print yet: refused, a finding each" $
-        refused scalePacked @?= Right ["Target: FuryKernel.Metal doesn't lower packs yet. (in scale_packed)"]
+        refused viaTable @?= Right ["Target: FuryKernel.Metal doesn't lower tables yet. (in via_table)"]
     , testCase "two kernels of one name refused, as the CPU backend refuses them" $ case check (rmsnorm 2816) of
         Left fs -> assertFailure (show fs)
         Right c -> case backendLower metal [c, c] of
@@ -320,6 +366,18 @@ tests =
             , "    h[fk_thread.x] = as_type<half>(ushort(0x3e00));"
             , "    b[fk_thread.x] = metal::select(0u, 1u, bool(int((!(v < 0.0f))) & int(true)));"
             ]
+    , testCase "packs of two 16-bit elements: a ushort2 each, not a uint" $
+        body halves
+          @?= Right
+            [ "    const ushort2 fk_pack_p_0 = reinterpret_cast<device const ushort2*>(a)[fk_thread.x];"
+            , "    const bfloat p_0 = as_type<bfloat>(fk_pack_p_0.x);"
+            , "    const bfloat p_1 = as_type<bfloat>(fk_pack_p_0.y);"
+            , "    reinterpret_cast<device fk_ushort2*>(b)[fk_thread.x] = ushort2(as_type<ushort>(p_1), as_type<ushort>(p_0));"
+            , "    const ushort2 fk_pack_q_0 = reinterpret_cast<device const ushort2*>(c)[fk_thread.x];"
+            , "    const half q_0 = as_type<half>(fk_pack_q_0.x);"
+            , "    const half q_1 = as_type<half>(fk_pack_q_0.y);"
+            , "    reinterpret_cast<device fk_ushort2*>(d)[fk_thread.x] = ushort2(as_type<ushort>(q_0), as_type<ushort>(q_1));"
+            ]
     , testCase "comparisons, every operator, and false" $
         body cmp
           @?= Right
@@ -373,6 +431,16 @@ tests =
             ]
     , testCase "threadgroup memory as the launch table reports it: each array's end rounded to 16 bytes" $
         (.lkTgMemory) <$> launchTable tgSmall @?= Right 16
+    , testCase "a pack loaded from a buffer the kernel also writes: not const" $
+        body packRw
+          @?= Right
+            [ "    const uint4 fk_pack_v_0 = reinterpret_cast<device fk_uint4*>(x)[fk_thread.x];"
+            , "    const float v_0 = as_type<float>(fk_pack_v_0.x);"
+            , "    const float v_1 = as_type<float>(fk_pack_v_0.y);"
+            , "    const float v_2 = as_type<float>(fk_pack_v_0.z);"
+            , "    const float v_3 = as_type<float>(fk_pack_v_0.w);"
+            , "    reinterpret_cast<device fk_uint4*>(x)[fk_thread.x] = uint4(as_type<uint>(v_3), as_type<uint>(v_2), as_type<uint>(v_1), as_type<uint>(v_0));"
+            ]
     ]
  where
   withLowered f = case check (rmsnorm 2816) of
@@ -420,6 +488,38 @@ scalePacked = kernel "scale_packed" $ do
     strided "j" packs $ \j -> do
       v <- loadPack @8 "v" x j
       storePack @8 y j [narrow @BF16 (widen @Float e * s) | e <- unpack v]
+
+-- | Copies through packs of other widths: two f32, sixteen and two u8.
+copies :: Kernel AppleGPU9
+copies = kernel "copies" $ do
+  a <- buffer @ReadOnly @16 @Float "a" 64
+  b <- buffer @ReadWrite @16 @Float "b" 64
+  c <- buffer @ReadOnly @16 @Word8 "c" 512
+  d <- buffer @WriteOnly @16 @Word8 "d" 512
+  e <- buffer @WriteOnly @16 @Word8 "e" 64
+  threads @32
+  groups 1
+  pure . pure $ do
+    f <- loadPack @2 "f" a threadIndex
+    storePack @2 b threadIndex (unpack f)
+    u <- loadPack @16 "u" c threadIndex
+    storePack @16 d threadIndex (unpack u)
+    h <- loadPack @2 "h" c threadIndex
+    storePack @2 e threadIndex (reverse (unpack h))
+
+-- | An element and a pack of eight bf16, read through a table of addresses.
+viaTable :: Kernel AppleGPU9
+viaTable = kernel "via_table" $ do
+  entry <- param @Word32 "entry"
+  experts <- table @16 @BF16 "experts" 4 64
+  y <- buffer @WriteOnly @16 @Float "y" 2
+  threads @32
+  groups 1
+  pure . pure $ do
+    p <- loadPackVia @8 "p" experts entry 1
+    whenLane (threadIndex .== 0) $ do
+      store y 0 (widen @Float (loadVia experts entry 3))
+      store y 1 (widen @Float (last (unpack p)))
 
 -- | RMSNorm over rows of @hidden@ elements, as in furykernel's tests.
 rmsnorm :: Word32 -> Kernel AppleGPU9
@@ -493,6 +593,21 @@ ints = kernel "ints" $ do
     store y 2 (a * b)
     store y 3 (negate a)
     store y 4 (abs a)
+
+-- | Packs of two 16-bit elements: bf16 reversed, f16 as they are.
+halves :: Kernel AppleGPU9
+halves = kernel "halves" $ do
+  a <- buffer @ReadOnly @16 @BF16 "a" 64
+  b <- buffer @WriteOnly @16 @BF16 "b" 64
+  c <- buffer @ReadOnly @16 @F16 "c" 64
+  d <- buffer @WriteOnly @16 @F16 "d" 64
+  threads @32
+  groups 1
+  pure . pure $ do
+    p <- loadPack @2 "p" a threadIndex
+    storePack @2 b threadIndex (reverse (unpack p))
+    q <- loadPack @2 "q" c threadIndex
+    storePack @2 d threadIndex (unpack q)
 
 -- | No parameters: no struct, no binding for one.
 noParams :: Kernel AppleGPU9
@@ -679,3 +794,13 @@ tgSmall = kernel "tg_small" $ do
       whenLane (threadIndex .< 2) $ tgStore s threadIndex (toF32 threadIndex)
       barrier
       store y threadIndex (tgLoad s (threadIndex `remE` 2))
+
+-- | A pack loaded from a buffer the kernel also writes, and stored back.
+packRw :: Kernel AppleGPU9
+packRw = kernel "pack_rw" $ do
+  x <- buffer @ReadWrite @16 @Float "x" 128
+  threads @32
+  groups 1
+  pure . pure $ do
+    v <- loadPack @4 "v" x threadIndex
+    storePack @4 x threadIndex (reverse (unpack v))

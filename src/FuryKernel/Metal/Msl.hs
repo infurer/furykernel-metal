@@ -121,10 +121,15 @@ What the printing fixes:
   in every thread of a launch, narrowed to f16 too, gave the f16 bits
   (observed on macOS 27.2's compiler);
 * a parameter struct's size and each field's offset are asserted against
-  the ABI's (@static_assert@), the layout runtimes fill it by.
+  the ABI's (@static_assert@), the layout runtimes fill it by;
+* a pack is one load or store of a @ushort@, @ushort2@, @uint@, @uint2@
+  or @uint4@ through the buffer's pointer (two 16-bit elements a
+  @ushort2@, which their half or bfloat accesses don't alias, unlike a
+  @uint@), its elements taken apart and put together
+  with 'as_type', so every element type and width lowers the same way.
 
 'metal' refuses what it doesn't print yet, a finding of the Target rule
-for each: packs, tables, fragments, packs stored to threadgroup arrays,
+for each: tables, fragments, packs stored to threadgroup arrays,
 SIMD-group barriers, fragments widened into f32 and fragments' rows
 scaled.
 
@@ -139,6 +144,7 @@ module FuryKernel.Metal.Msl (
 import Control.Applicative ((<|>))
 import Control.Monad.Trans.State.Strict (State, get, gets, modify', runState)
 import Data.Containers.ListUtils (nubOrd)
+import Data.Foldable (traverse_)
 import Data.List (sortOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -155,7 +161,7 @@ import FuryKernel.Finding (Finding (..), Location (..), Rule (Names, Target), lo
 import FuryKernel.IR hiding (Kernel (..))
 import FuryKernel.IR qualified as IR
 import FuryKernel.Metal.Target (AppleGPU9)
-import FuryKernel.Type (ScalarType (..))
+import FuryKernel.Type (ScalarType (..), scalarSize)
 import GHC.Float (castFloatToWord32)
 import Numeric (showHex)
 
@@ -196,16 +202,14 @@ refusals c =
  where
   k = checkedIR c
 
-{- | The constructs of a kernel this lowering doesn't print yet: packs,
-tables, fragments, packs stored to threadgroup arrays, SIMD-group
-barriers, fragments widened into f32 and fragments' rows scaled.
+{- | The constructs of a kernel this lowering doesn't print yet: tables,
+fragments, packs stored to threadgroup arrays, SIMD-group barriers,
+fragments widened into f32 and fragments' rows scaled.
 -}
 notLowered :: IR.Kernel -> [Text]
 notLowered k = ["tables" | not (null k.kernelTables)] <> concatMap construct k.kernelBody
  where
   construct = \case
-    SLoadPack {} -> ["packs"]
-    SStorePack {} -> ["packs"]
     STgStorePack {} -> ["packs stored to threadgroup arrays"]
     SSimdBarrier -> ["SIMD-group barriers"]
     SFragVar {} -> ["fragments"]
@@ -271,9 +275,16 @@ renderMsl ks =
  where
   kernels = map kernelSource (sortOn ((.kernelName) . checkedIR) ks)
 
--- | A function the printing calls rather than repeat an operand.
+{- | What the printing declares ahead of the kernels: a function it calls
+rather than repeat an operand, or a pack's container under a name that
+may alias.
+-}
 data Helper
-  = -- | @fk_abs_i32@: an i32's magnitude, wrapping as the IR defines it.
+  = {- | @fk_uint4@ and the like: a container that may alias every type, which
+    a pack's loads and stores go through.
+    -}
+    Container Text
+  | -- | @fk_abs_i32@: an i32's magnitude, wrapping as the IR defines it.
     AbsI32
   | -- | @fk_bf16@: a float narrowed to bf16's bits.
     NarrowBF16
@@ -285,6 +296,10 @@ data Helper
 
 helperSource :: Helper -> [Text]
 helperSource = \case
+  Container c ->
+    [ ""
+    , "typedef " <> c <> " __attribute__((may_alias)) fk_" <> c <> ";"
+    ]
   Keep ->
     [ ""
     , "static inline float fk_keep(float x)"
@@ -323,7 +338,7 @@ helperSource = \case
     , "}"
     ]
 
--- | A kernel's source, and the helpers it calls.
+-- | A kernel's source, and the helpers it uses.
 kernelSource :: Checked t -> ([Text], Set Helper)
 kernelSource c = (source, end.envHelpers)
  where
@@ -379,10 +394,13 @@ kernelSource c = (source, end.envHelpers)
 data Env = Env
   { envScopes :: [Map Name ScalarType]
   , envHelpers :: Set Helper
-  -- ^ The helpers the kernel's expressions call, so far.
+  {- ^ The helpers the kernel's expressions call and its packs go through,
+  so far.
+  -}
   , envParams :: Map Name ScalarType
   , envBuffers :: Map Name ScalarType
   , envArrays :: Map Name ScalarType
+  , envAccess :: Map Name Access
   , envHeld :: Set Name
   -- ^ The bf16 locals held as their bits.
   }
@@ -395,6 +413,7 @@ initialEnv k =
     , envParams = Map.fromList [(p.paramName, p.paramType) | p <- k.kernelParams]
     , envBuffers = Map.fromList [(b.bufName, b.bufType) | b <- k.kernelBuffers]
     , envArrays = Map.fromList [(a.tgName, a.tgType) | a <- k.kernelTgArrays]
+    , envAccess = Map.fromList [(b.bufName, b.bufAccess) | b <- k.kernelBuffers]
     , envHeld = Set.empty
     }
 
@@ -465,6 +484,24 @@ stmt depth = \case
     i' <- ex i
     e' <- exNative e
     pure [pad <> a <> "[" <> i' <> "] = " <> e' <> ";"]
+  SLoadPack ns t b i -> do
+    i' <- ex i
+    access <- gets (Map.findWithDefault ReadOnly b . (.envAccess))
+    traverse_ (`declare` t) ns
+    let p = packLayout t (length ns)
+        raw = "fk_pack_" <> T.concat (take 1 ns)
+    c <- if access == ReadOnly then pure p.packContainer else aliased p.packContainer
+    let pointer = "reinterpret_cast<device " <> (if access == ReadOnly then "const " else "") <> c <> "*>(" <> b <> ")"
+    pure $
+      [pad <> "const " <> p.packContainer <> " " <> raw <> " = " <> pointer <> "[" <> i' <> "];"]
+        <> [pad <> "const " <> mslType t <> " " <> n <> " = " <> unpackElement p raw e <> ";" | (e, n) <- zip [0 ..] ns]
+  SStorePack b i es -> do
+    i' <- ex i
+    es' <- traverse exNative es
+    t <- gets (Map.findWithDefault TF32 b . (.envBuffers))
+    let p = packLayout t (length es)
+    c <- aliased p.packContainer
+    pure [pad <> "reinterpret_cast<device " <> c <> "*>(" <> b <> ")[" <> i' <> "] = " <> packValue p es' <> ";"]
   SIf _ c th el -> do
     c' <- ex c
     th' <- scoped (concat <$> traverse (stmt (depth + 1)) th)
@@ -490,8 +527,6 @@ stmt depth = \case
     pure s
   -- Refused before printing ('refusals').
   SStoreVia {} -> notPrinted
-  SLoadPack {} -> notPrinted
-  SStorePack {} -> notPrinted
   STgStorePack {} -> notPrinted
   SLoadPackVia {} -> notPrinted
   SSimdBarrier -> notPrinted
@@ -506,6 +541,11 @@ stmt depth = \case
   line prefix e suffix = do
     e' <- ex e
     pure [pad <> prefix <> e' <> suffix]
+  -- A pack's container as its loads and stores name it: the typedef that
+  -- may alias every type.
+  aliased c = do
+    modify' $ \s -> s {envHelpers = Set.insert (Container c) s.envHelpers}
+    pure ("fk_" <> c)
   ex e = do
     env <- get
     modify' $ \s -> s {envHelpers = Set.union (helpersOf env e) s.envHelpers}
@@ -527,6 +567,71 @@ stmt depth = \case
     SimdSum -> "metal::simd_sum"
     SimdMax -> "metal::simd_max"
     SimdMin -> "metal::simd_min"
+
+------------------------------------------------------------------------------
+-- Packs
+
+-- | How a pack sits in memory: words of up to four bytes in one vector.
+data PackLayout = PackLayout
+  { packElement :: ScalarType
+  , packContainer :: Text
+  {- ^ @ushort@, @ushort2@, @uint@, @uint2@ or @uint4@, its loads and
+  stores going through its may_alias name.
+  -}
+  , packWord :: Text
+  -- ^ @ushort@ or @uint@.
+  , packWords :: Int
+  , packPerWord :: Int
+  -- ^ Elements per word.
+  }
+
+-- | The gate made the size a power of two, from 2 to 16 bytes on AppleGPU9.
+packLayout :: ScalarType -> Int -> PackLayout
+packLayout t n =
+  PackLayout
+    { packElement = t
+    , packContainer = if count == 1 then wordType else wordType <> showT count
+    , packWord = wordType
+    , packWords = count
+    , packPerWord = wordBytes `div` size
+    }
+ where
+  size = scalarSize t
+  bytes = n * size
+  -- Two 16-bit elements go as two words, a ushort2: before the
+  -- containers' may_alias names, a vector was what Metal's compiler took
+  -- to alias their half or bfloat accesses below MSL 4.1, a uint not.
+  wordBytes = if size == 2 && bytes == 4 then 2 else min 4 bytes
+  wordType = if wordBytes == 2 then "ushort" else "uint"
+  count = bytes `div` wordBytes
+
+-- | Element @e@ of a pack loaded into @raw@.
+unpackElement :: PackLayout -> Text -> Int -> Text
+unpackElement p raw e
+  | p.packPerWord == 1 = "as_type<" <> mslType p.packElement <> ">(" <> w <> ")"
+  | otherwise =
+      "as_type<" <> mslType p.packElement <> showT p.packPerWord <> ">(" <> w <> ")." <> component (e `mod` p.packPerWord)
+ where
+  w = if p.packWords == 1 then raw else raw <> "." <> component (e `div` p.packPerWord)
+
+-- | A pack's value from its elements.
+packValue :: PackLayout -> [Text] -> Text
+packValue p es = case map wordOf (chunks es) of
+  [w] -> w
+  ws -> p.packContainer <> "(" <> T.intercalate ", " ws <> ")"
+ where
+  wordOf = \case
+    [e] | p.packPerWord == 1 -> "as_type<" <> p.packWord <> ">(" <> e <> ")"
+    vs -> "as_type<" <> p.packWord <> ">(" <> mslType p.packElement <> showT p.packPerWord <> "(" <> T.intercalate ", " vs <> "))"
+  chunks [] = []
+  chunks xs = let (a, b) = splitAt p.packPerWord xs in a : chunks b
+
+component :: Int -> Text
+component = \case
+  0 -> "x"
+  1 -> "y"
+  2 -> "z"
+  _ -> "w"
 
 ------------------------------------------------------------------------------
 -- Expressions
