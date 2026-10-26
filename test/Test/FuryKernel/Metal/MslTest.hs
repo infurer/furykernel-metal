@@ -1,7 +1,9 @@
 -- SPDX-FileCopyrightText: 2026 Mika Tammi
 -- SPDX-License-Identifier: BSD-3-Clause
 
--- | The MSL of an RMSNorm kernel and of packs, golden, and the RMSNorm kernel's launch table.
+{- | The MSL of an RMSNorm kernel, of packs and of tables, golden, and the
+launch tables of the RMSNorm kernel and of a table's bindings.
+-}
 module Test.FuryKernel.Metal.MslTest (tests) where
 
 import Data.Int (Int32, Int8)
@@ -14,7 +16,7 @@ import FuryKernel.Finding (Finding (..), renderFinding)
 import FuryKernel.IR (Expr (..), Literal (..))
 import FuryKernel.Metal (AppleGPU9, metal, mslLanguage)
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (assertFailure, testCase, (@?=))
+import Test.Tasty.HUnit (assertBool, assertFailure, testCase, (@?=))
 
 tests :: TestTree
 tests =
@@ -150,6 +152,30 @@ tests =
             , "    const uchar h_1 = as_type<uchar2>(fk_pack_h_0).y;"
             , "    reinterpret_cast<device fk_ushort*>(e)[fk_thread.x] = as_type<ushort>(uchar2(h_1, h_0));"
             ]
+    , testCase "tables: a buffer of addresses, each cast where it is read" $ do
+        body viaTable
+          @?= Right
+            [ "    const uint4 fk_pack_p_0 = ((device const uint4*)(experts[fk_p.entry]))[1u];"
+            , "    const bfloat p_0 = as_type<bfloat2>(fk_pack_p_0.x).x;"
+            , "    const bfloat p_1 = as_type<bfloat2>(fk_pack_p_0.x).y;"
+            , "    const bfloat p_2 = as_type<bfloat2>(fk_pack_p_0.y).x;"
+            , "    const bfloat p_3 = as_type<bfloat2>(fk_pack_p_0.y).y;"
+            , "    const bfloat p_4 = as_type<bfloat2>(fk_pack_p_0.z).x;"
+            , "    const bfloat p_5 = as_type<bfloat2>(fk_pack_p_0.z).y;"
+            , "    const bfloat p_6 = as_type<bfloat2>(fk_pack_p_0.w).x;"
+            , "    const bfloat p_7 = as_type<bfloat2>(fk_pack_p_0.w).y;"
+            , "    if ((fk_thread.x == 0u)) {"
+            , "        y[0u] = static_cast<float>(((device const bfloat*)(experts[fk_p.entry]))[3u]);"
+            , "        y[1u] = static_cast<float>(p_7);"
+            , "    }"
+            ]
+        case check viaTable of
+          Left fs -> assertFailure (show fs)
+          Right c -> case backendLower metal [c] of
+            Left fs -> assertFailure (show fs)
+            Right l -> do
+              assertBool "the table's binding" ("    device const ulong* experts [[buffer(1)]]," `elem` T.lines l.loweredSource)
+              map (\t -> (t.lkBindings, t.lkParamsBinding)) l.loweredKernels @?= [([("y", 0), ("experts", 1)], Just 2)]
     , testCase "i32 arithmetic through uint, wrapping as the IR defines it" $
         body ints
           @?= Right
@@ -183,7 +209,7 @@ tests =
             , "    }"
             ]
     , testCase "what it doesn't print yet: refused, a finding each" $
-        refused viaTable @?= Right ["Target: FuryKernel.Metal doesn't lower tables yet. (in via_table)"]
+        refused tgPacked @?= Right ["Target: FuryKernel.Metal doesn't lower packs stored to threadgroup arrays yet. (in tg_packed)"]
     , testCase "two kernels of one name refused, as the CPU backend refuses them" $ case check (rmsnorm 2816) of
         Left fs -> assertFailure (show fs)
         Right c -> case backendLower metal [c, c] of
@@ -474,6 +500,22 @@ refused k = case check k of
   Right c -> case backendLower metal [c] of
     Left fs -> Right (map renderFinding fs)
     Right _ -> Left "lowered"
+
+-- | Four elements a thread stored to threadgroup memory at once.
+tgPacked :: Kernel AppleGPU9
+tgPacked = kernel "tg_packed" $ do
+  a <- buffer @ReadOnly @16 @Float "a" 1024
+  b <- buffer @WriteOnly @16 @Float "b" 256
+  threads @256
+  groups 1
+  pure $ do
+    packed <- tgArray @1024 @Float "staged"
+    plain <- tgArray @256 @Float "plain"
+    pure $ do
+      tgStorePack packed threadIndex [load a (threadIndex * 4 + fromIntegral e) | e <- [0 .. 3 :: Int]]
+      tgStore plain threadIndex 0
+      barrier
+      store b threadIndex (tgLoad packed threadIndex + tgLoad plain threadIndex)
 
 -- | y = x * s, eight elements per lane at once, as in furykernel's tests.
 scalePacked :: Kernel AppleGPU9

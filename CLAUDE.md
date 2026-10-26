@@ -100,8 +100,10 @@ nix fmt && git diff --exit-code &&
     rounding once more. A pack is one
     `ushort`, `ushort2` (two 16-bit elements, which a `uint` would alias),
     `uint`, `uint2` or `uint4` load or store through the
-    buffer's pointer, taken apart and put together with `as_type`. Buffers
-    bind from 0 in declaration order, the parameter struct after them.
+    buffer's pointer, taken apart and put together with `as_type`. A table
+    is a `device const ulong*` of GPU addresses, each cast to a pointer
+    where it is read. Buffers bind from 0 in declaration order, tables
+    after them, the parameter struct last.
     Every threadgroup array is declared `alignas(16)`, so Metal starts each
     at a multiple of 16 bytes; it allocates at most each one's size rounded
     up to 16, summed, the launch table's `lkTgMemory`: as observed on the
@@ -135,11 +137,12 @@ nix fmt && git diff --exit-code &&
     narrows clamped with `metal::clamp` or `metal::min`, or wrapped
     through `uint` and `as_type`.
     It refuses what it doesn't print yet, a `Target` finding for each:
-    tables, fragments, packs stored to threadgroup arrays, SIMD-group
-    barriers, fragments widened into f32 and fragments' rows scaled.
-- `test/`: the test suite, tasty: the limits of the targets, and golden
-  MSL, an RMSNorm kernel's launch table with it, packs through ushort,
-  ushort2, uint2 and uint4 included.
+    fragments, packs stored to threadgroup arrays, SIMD-group barriers,
+    fragments widened into f32, fragments' rows scaled and tables written
+    through.
+- `test/`: the test suite, tasty: the limits of the targets, and golden MSL,
+  the launch tables of an RMSNorm kernel and of a table's bindings with it,
+  packs through ushort, ushort2, uint2 and uint4 and tables included.
 - `nix/`: `package.nix` (the library, built with GHC 9.12 under
   `-Werror`), `checks.nix` (the build with its tests, hlint,
   cabal2nix-in-sync and `reuse lint`), `devshell.nix` (`checks.devshell`

@@ -28,9 +28,11 @@ with Metal at run time, and do what it leaves to them:
 * leave threadgroup memory to the source, which declares the arrays
   statically: 'lkTgMemory', what they take, is for information, and a
   runtime that sets @threadgroupMemoryLength@ too allocates it twice;
-* bind the buffers at their indices in 'lkBindings', and the parameter
-  struct at 'lkParamsBinding', with @setBytes@ (up to 4 KB) or from a
-  buffer at an offset that is a multiple of 4;
+* bind the buffers and tables at their indices in 'lkBindings', and the
+  parameter struct at 'lkParamsBinding', with @setBytes@ (up to 4 KB) or
+  from a buffer at an offset that is a multiple of 4;
+* bind a table's buffer 8-byte aligned, and make the arrays its entries
+  point into resident (@useResource@);
 * dispatch 'lkGroups' threadgroups of 'lkThreads' threads with
   @dispatchThreadgroups@, not @dispatchThreads@, whose grid needn't be a
   multiple of the threadgroup, and skip a launch whose grid comes to 0

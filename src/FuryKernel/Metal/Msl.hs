@@ -126,15 +126,18 @@ What the printing fixes:
   or @uint4@ through the buffer's pointer (two 16-bit elements a
   @ushort2@, which their half or bfloat accesses don't alias, unlike a
   @uint@), its elements taken apart and put together
-  with 'as_type', so every element type and width lowers the same way.
+  with 'as_type', so every element type and width lowers the same way;
+* a table is a buffer of @ulong@ GPU addresses, each cast to a pointer to
+  its arrays' element type where it is read.
 
 'metal' refuses what it doesn't print yet, a finding of the Target rule
-for each: tables, fragments, packs stored to threadgroup arrays,
-SIMD-group barriers, fragments widened into f32 and fragments' rows
-scaled.
+for each: fragments, packs stored to threadgroup arrays, SIMD-group
+barriers, fragments widened into f32, fragments' rows scaled and tables
+written through.
 
-Buffers bind in declaration order from index 0, the parameter struct
-after them. bfloat needs MSL 3.1, which AppleGPU9 has.
+Buffers bind in declaration order from index 0, tables after them, the
+parameter struct last. The source is MSL 4.1, the floor: a language
+version is the operating system's, not the GPU's, and 4.1 is macOS 27's.
 -}
 module FuryKernel.Metal.Msl (
   metal,
@@ -202,12 +205,13 @@ refusals c =
  where
   k = checkedIR c
 
-{- | The constructs of a kernel this lowering doesn't print yet: tables,
+{- | The constructs of a kernel this lowering doesn't print yet:
 fragments, packs stored to threadgroup arrays, SIMD-group barriers,
-fragments widened into f32 and fragments' rows scaled.
+fragments widened into f32, fragments' rows scaled and tables written
+through.
 -}
 notLowered :: IR.Kernel -> [Text]
-notLowered k = ["tables" | not (null k.kernelTables)] <> concatMap construct k.kernelBody
+notLowered k = ["tables written through" | any ((/= ReadOnly) . (.tableAccess)) k.kernelTables] <> concatMap construct k.kernelBody
  where
   construct = \case
     STgStorePack {} -> ["packs stored to threadgroup arrays"]
@@ -245,8 +249,8 @@ lower ks =
       , lkIrHash = irHash c
       , lkThreads = k.kernelThreads
       , lkGroups = k.kernelGroups
-      , lkBindings = zip (map (.bufName) k.kernelBuffers) [0 ..]
-      , lkParamsBinding = if null k.kernelParams then Nothing else Just (fromIntegral (length k.kernelBuffers))
+      , lkBindings = zip (map (.bufName) k.kernelBuffers <> map (.tableName) k.kernelTables) [0 ..]
+      , lkParamsBinding = if null k.kernelParams then Nothing else Just (fromIntegral (length k.kernelBuffers + length k.kernelTables))
       , lkTgMemory = snd (tgLayout k.kernelTgArrays)
       }
    where
@@ -375,7 +379,10 @@ kernelSource c = (source, end.envHelpers)
     [ "device " <> constness b <> mslType b.bufType <> "* " <> b.bufName <> " [[buffer(" <> showT i <> ")]]"
     | (b, i) <- zip k.kernelBuffers [0 :: Int ..]
     ]
-      <> [ "constant " <> paramsName <> "& fk_p [[buffer(" <> showT (length k.kernelBuffers) <> ")]]"
+      <> [ "device const ulong* " <> t.tableName <> " [[buffer(" <> showT i <> ")]]"
+         | (t, i) <- zip k.kernelTables [length k.kernelBuffers ..]
+         ]
+      <> [ "constant " <> paramsName <> "& fk_p [[buffer(" <> showT (length k.kernelBuffers + length k.kernelTables) <> ")]]"
          | not (null k.kernelParams)
          ]
       <> [ "uint3 fk_thread [[thread_position_in_threadgroup]]"
@@ -401,6 +408,7 @@ data Env = Env
   , envBuffers :: Map Name ScalarType
   , envArrays :: Map Name ScalarType
   , envAccess :: Map Name Access
+  , envTables :: Map Name ScalarType
   , envHeld :: Set Name
   -- ^ The bf16 locals held as their bits.
   }
@@ -414,6 +422,7 @@ initialEnv k =
     , envBuffers = Map.fromList [(b.bufName, b.bufType) | b <- k.kernelBuffers]
     , envArrays = Map.fromList [(a.tgName, a.tgType) | a <- k.kernelTgArrays]
     , envAccess = Map.fromList [(b.bufName, b.bufAccess) | b <- k.kernelBuffers]
+    , envTables = Map.fromList [(t.tableName, t.tableType) | t <- k.kernelTables]
     , envHeld = Set.empty
     }
 
@@ -445,9 +454,8 @@ typeOf env = \case
   EConvert t _ -> t
   ENarrowInt _ t _ -> t
   ELoad n _ -> Map.findWithDefault TF32 n env.envBuffers
+  ELoadVia n _ _ -> Map.findWithDefault TF32 n env.envTables
   ETgLoad n _ -> Map.findWithDefault TF32 n env.envArrays
-  -- Refused before printing ('refusals').
-  ELoadVia {} -> notPrinted
 
 ------------------------------------------------------------------------------
 -- Statements
@@ -495,6 +503,16 @@ stmt depth = \case
     pure $
       [pad <> "const " <> p.packContainer <> " " <> raw <> " = " <> pointer <> "[" <> i' <> "];"]
         <> [pad <> "const " <> mslType t <> " " <> n <> " = " <> unpackElement p raw e <> ";" | (e, n) <- zip [0 ..] ns]
+  SLoadPackVia ns t b e i -> do
+    e' <- ex e
+    i' <- ex i
+    traverse_ (`declare` t) ns
+    let p = packLayout t (length ns)
+        raw = "fk_pack_" <> T.concat (take 1 ns)
+        pointer = "((device const " <> p.packContainer <> "*)(" <> b <> "[" <> e' <> "]))"
+    pure $
+      [pad <> "const " <> p.packContainer <> " " <> raw <> " = " <> pointer <> "[" <> i' <> "];"]
+        <> [pad <> "const " <> mslType t <> " " <> n <> " = " <> unpackElement p raw el <> ";" | (el, n) <- zip [0 ..] ns]
   SStorePack b i es -> do
     i' <- ex i
     es' <- traverse exNative es
@@ -528,7 +546,6 @@ stmt depth = \case
   -- Refused before printing ('refusals').
   SStoreVia {} -> notPrinted
   STgStorePack {} -> notPrinted
-  SLoadPackVia {} -> notPrinted
   SSimdBarrier -> notPrinted
   SFragVar {} -> notPrinted
   SFragLoad {} -> notPrinted
@@ -673,9 +690,9 @@ expr env = go
       | otherwise -> "static_cast<" <> mslType t <> ">(" <> go e <> ")"
     ENarrowInt o t e -> narrowInt o t (go e)
     ELoad n i -> n <> "[" <> go i <> "]"
+    ELoadVia n e i ->
+      "((device const " <> mslType (Map.findWithDefault TF32 n env.envTables) <> "*)(" <> n <> "[" <> go e <> "]))[" <> go i <> "]"
     ETgLoad n i -> n <> "[" <> go i <> "]"
-    -- Refused before printing ('refusals').
-    ELoadVia {} -> notPrinted
   bitsOf x = if held env x then go x else "as_type<ushort>(" <> go x <> ")"
 
 {- | Whether a bf16 value is held as its bits, a @ushort@: a select's, a
