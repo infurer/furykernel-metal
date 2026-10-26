@@ -6,4 +6,8 @@
 The target descriptions, the lowering to Metal Shading Language and the
 generated launchers are added module by module.
 -}
-module FuryKernel.Metal () where
+module FuryKernel.Metal (
+  AppleGPU9,
+) where
+
+import FuryKernel.Metal.Target (AppleGPU9)

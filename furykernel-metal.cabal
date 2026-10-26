@@ -35,9 +35,38 @@ common warnings
 
 common extensions
   default-language: GHC2024
+  default-extensions:
+    OverloadedRecordDot
+    OverloadedStrings
+    StrictData
+    TypeFamilies
 
 library
   import: warnings, extensions
   hs-source-dirs: src
-  exposed-modules: FuryKernel.Metal
-  build-depends: base >=4.21 && <5
+  exposed-modules:
+    FuryKernel.Metal
+    FuryKernel.Metal.Target
+
+  build-depends:
+    base >=4.21 && <5,
+    furykernel >=0.2 && <0.3,
+    text >=2.1 && <2.2,
+
+test-suite furykernel-metal-test
+  import: warnings, extensions
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is: Main.hs
+  other-modules: Test.FuryKernel.Metal.TargetTest
+  ghc-options:
+    -threaded
+    -rtsopts
+    -with-rtsopts=-N
+
+  build-depends:
+    base,
+    furykernel,
+    furykernel-metal,
+    tasty >=1.5 && <1.6,
+    tasty-hunit >=0.10 && <0.11,

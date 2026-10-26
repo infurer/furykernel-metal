@@ -17,7 +17,7 @@
         pkgs.runCommand "hlint" {
           nativeBuildInputs = [pkgs.hlint];
         } ''
-          hlint ${self}/src
+          hlint --hint=${self}/.hlint.yaml ${self}/src ${self}/test
           touch $out
         '';
 

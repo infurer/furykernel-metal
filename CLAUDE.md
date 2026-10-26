@@ -61,10 +61,16 @@ nix fmt && git diff --exit-code &&
 ## Architecture
 
 - `flake.nix`: flake-parts on nixos-26.05; systems x86_64-linux,
-  aarch64-linux and aarch64-darwin.
+  aarch64-linux and aarch64-darwin. The `furykernel` input is the core,
+  whose package `nix/package.nix` builds this one against. `flake.lock`
+  pins it as a `github:infurer/furykernel` revision on its master, as
+  `nix run .#check-pins` checks.
 - `furykernel-metal.cabal`, `src/`: the library, one package.
   `furykernel-metal.nix` is cabal2nix's output, committed so that
   evaluation never builds anything first.
+  - `FuryKernel.Metal.Target`: the GPU families, `AppleGPU9` (family 9) so
+    far, as `Target` instances.
+- `test/`: the test suite, tasty.
 - `nix/`: `package.nix` (the library, built with GHC 9.12 under
   `-Werror`), `checks.nix` (the build with its tests, hlint,
   cabal2nix-in-sync and `reuse lint`), `devshell.nix` (`checks.devshell`
