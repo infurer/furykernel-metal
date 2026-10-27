@@ -216,6 +216,23 @@ tests =
             , "    f.thread_elements()[1] = static_cast<float>(h.thread_elements()[1]);"
             , "    metal::simdgroup_store(f, c + 0u, 8u);"
             ]
+    , testCase "fragments' rows scaled, a lane's row found from Apple's layout" $
+        body rowScaled
+          @?= Right
+            [ "    alignas(16) threadgroup float scales[8];"
+            , "    if ((fk_thread.x < 8u)) {"
+            , "        scales[fk_thread.x] = ((static_cast<float>(fk_thread.x) * 0.5f) + 1.0f);"
+            , "    }"
+            , "    metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);"
+            , "    metal::simdgroup_matrix<float, 8, 8> f = metal::make_filled_simdgroup_matrix<float, 8, 8>(0.0f);"
+            , "    metal::simdgroup_load(f, b + 0u, 8u);"
+            , "    {"
+            , "        const float fk_scale = scales[0u + (((fk_lane / 4u) & 4u) + ((fk_lane / 2u) % 4u))];"
+            , "        f.thread_elements()[0] *= fk_scale;"
+            , "        f.thread_elements()[1] *= fk_scale;"
+            , "    }"
+            , "    metal::simdgroup_store(f, c + 0u, 8u);"
+            ]
     , testCase "i32 arithmetic through uint, wrapping as the IR defines it" $
         body ints
           @?= Right
@@ -249,7 +266,7 @@ tests =
             , "    }"
             ]
     , testCase "what it doesn't print yet: refused, a finding each" $
-        refused rowScaled @?= Right ["Target: FuryKernel.Metal doesn't lower fragments' rows scaled yet. (in row_scaled)"]
+        refused throughBlocks @?= Right ["Target: FuryKernel.Metal doesn't lower tables written through yet. (in through_blocks)"]
     , testCase "two kernels of one name refused, as the CPU backend refuses them" $ case check (rmsnorm 2816) of
         Left fs -> assertFailure (show fs)
         Right c -> case backendLower metal [c, c] of
@@ -683,6 +700,24 @@ viaTable = kernel "via_table" $ do
     whenLane (threadIndex .== 0) $ do
       store y 0 (widen @Float (loadVia experts entry 3))
       store y 1 (widen @Float (last (unpack p)))
+
+{- | Each threadgroup's row of x, doubled, stored through a table of blocks
+at the entry ids gives it, and read back through it.
+-}
+throughBlocks :: Kernel AppleGPU9
+throughBlocks = kernel "through_blocks" $ do
+  ids <- buffer @ReadOnly @16 @Word32 "ids" 4
+  x <- buffer @ReadOnly @16 @Float "x" 256
+  y <- buffer @WriteOnly @16 @Float "y" 256
+  blocks <- tableOf @ReadWrite @16 @Float "blocks" 1024 64
+  distinct blocks
+  apartVia blocks
+  threads @64
+  groups 4
+  pure . pure $ do
+    e <- let_ "e" (load ids groupIndex)
+    storeVia blocks e threadIndex (load x (groupIndex * 64 + threadIndex) * 2)
+    store y (groupIndex * 64 + threadIndex) (loadVia blocks e threadIndex)
 
 {- | C = A · Bᵀ in 8×8 fragments, A and B 16 rows of k, B's tiles staged in
 threadgroup memory and loaded from there transposed, as in furykernel's

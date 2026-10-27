@@ -116,8 +116,11 @@ nix fmt && git diff --exit-code &&
     memory, which only the golden tests pin: on the M3 Max, whose SIMD
     groups seem to run in lockstep, every case passes without it.
     A fragment is widened a lane's elements at a time
-    (`thread_elements()`), a bfloat or half fragment's element k where a
-    float fragment's is, as observed on an M3 Max (AppleGPU9). A table
+    (`thread_elements()`), and its rows scaled the same way, each lane's
+    row found from the 8×8 layout observed on an M3 Max (AppleGPU9),
+    which MSL doesn't specify (a lane holds two elements of row
+    `(lane / 4 & 4) + (lane / 2 % 4)`, and a bfloat or half fragment's
+    element k where a float fragment's is). A table
     is a `device const ulong*` of GPU addresses, each cast to a pointer
     where it is read. A fragment is a `metal::simdgroup_matrix` of 8×8,
     made zero, loaded and stored from a pointer to its first element with
@@ -159,8 +162,7 @@ nix fmt && git diff --exit-code &&
     narrows clamped with `metal::clamp` or `metal::min`, or wrapped
     through `uint` and `as_type`.
     It refuses what it doesn't print yet, a `Target` finding for each:
-    fragments' rows scaled, tables written through and fragments loaded or
-    stored through tables.
+    tables written through and fragments loaded or stored through tables.
 - `test/`: the test suite, tasty: the limits of the targets, and golden MSL,
   the launch tables of an RMSNorm kernel and of a table's bindings with it,
   packs through ushort, ushort2, uint2 and uint4 and to threadgroup arrays

@@ -156,11 +156,15 @@ What the printing fixes:
 * a fragment widens into float a lane's elements at a time
   (@thread_elements()@), taking a bfloat or half fragment's element k to
   sit where a float fragment's does, which MSL doesn't specify: observed
-  on an M3 Max (AppleGPU9) from both.
+  on an M3 Max (AppleGPU9) from both;
+* a fragment's rows are scaled a lane's elements at a time too, each
+  lane's row found from the 8×8 layout observed on an M3 Max (AppleGPU9),
+  which MSL doesn't specify: a lane holds two elements of row
+  @(lane / 4 & 4) + (lane / 2 % 4)@.
 
 'metal' refuses what it doesn't print yet, a finding of the Target rule
-for each: fragments' rows scaled, tables written through and fragments
-loaded or stored through tables.
+for each: tables written through and fragments loaded or stored through
+tables.
 
 Buffers bind in declaration order from index 0, tables after them, the
 parameter struct last. The source is MSL 4.1, the floor: a language
@@ -232,9 +236,8 @@ refusals c =
  where
   k = checkedIR c
 
-{- | The constructs of a kernel this lowering doesn't print yet:
-fragments' rows scaled, tables written through and fragments loaded or
-stored through tables.
+{- | The constructs of a kernel this lowering doesn't print yet: tables
+written through and fragments loaded or stored through tables.
 -}
 notLowered :: IR.Kernel -> [Text]
 notLowered k = ["tables written through" | any ((/= ReadOnly) . (.tableAccess)) k.kernelTables] <> concatMap construct k.kernelBody
@@ -242,7 +245,6 @@ notLowered k = ["tables written through" | any ((/= ReadOnly) . (.tableAccess)) 
   construct = \case
     SFragLoad _ FVia {} _ _ _ -> ["fragments loaded or stored through tables"]
     SFragStore FVia {} _ _ _ -> ["fragments loaded or stored through tables"]
-    SFragScaleRows {} -> ["fragments' rows scaled"]
     SIf _ _ th el -> concatMap construct (th <> el)
     SFor _ _ _ _ _ body -> concatMap construct body
     _ -> []
@@ -587,6 +589,17 @@ stmt depth = \case
     st' <- ex st
     pure [pad <> "metal::simdgroup_load(" <> n <> ", " <> memory m <> " + " <> i' <> ", " <> st' <> (if transposed then ", ulong2(0, 0), true" else "") <> ");"]
   SFragMma d a b c -> pure [pad <> "metal::simdgroup_multiply_accumulate(" <> T.intercalate ", " [d, a, b, c] <> ");"]
+  -- Apple's 8×8 layout: a lane holds two elements of one row, (lane / 4 &
+  -- 4) + (lane / 2 % 4).
+  SFragScaleRows f a i -> do
+    i' <- ex i
+    pure
+      [ pad <> "{"
+      , pad <> "    const float fk_scale = " <> a <> "[" <> i' <> " + (((fk_lane / 4u) & 4u) + ((fk_lane / 2u) % 4u))];"
+      , pad <> "    " <> f <> ".thread_elements()[0] *= fk_scale;"
+      , pad <> "    " <> f <> ".thread_elements()[1] *= fk_scale;"
+      , pad <> "}"
+      ]
   -- A lane's elements of the one, converted into the same of the other.
   SFragConvert d s -> pure [pad <> d <> ".thread_elements()[" <> e <> "] = static_cast<float>(" <> s <> ".thread_elements()[" <> e <> "]);" | e <- ["0", "1"]]
   SFragStore m i st n -> do
@@ -595,7 +608,6 @@ stmt depth = \case
     pure [pad <> "metal::simdgroup_store(" <> n <> ", " <> memory m <> " + " <> i' <> ", " <> st' <> ");"]
   -- Refused before printing ('refusals').
   SStoreVia {} -> notPrinted
-  SFragScaleRows {} -> notPrinted
  where
   pad = T.replicate (4 * depth) " "
   fragment t = "metal::simdgroup_matrix<" <> mslType t <> ", 8, 8>"
