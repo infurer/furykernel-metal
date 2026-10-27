@@ -206,6 +206,16 @@ tests =
             , "    }"
             , "    metal::simdgroup_store(acc, c + ((row0 * 16u) + col0), 16u);"
             ]
+    , testCase "fragments widened into f32 a lane's elements at a time" $
+        body widened
+          @?= Right
+            [ "    metal::simdgroup_matrix<bfloat, 8, 8> h = metal::make_filled_simdgroup_matrix<bfloat, 8, 8>(as_type<bfloat>(ushort(0x0)));"
+            , "    metal::simdgroup_matrix<float, 8, 8> f = metal::make_filled_simdgroup_matrix<float, 8, 8>(0.0f);"
+            , "    metal::simdgroup_load(h, b + 0u, 8u);"
+            , "    f.thread_elements()[0] = static_cast<float>(h.thread_elements()[0]);"
+            , "    f.thread_elements()[1] = static_cast<float>(h.thread_elements()[1]);"
+            , "    metal::simdgroup_store(f, c + 0u, 8u);"
+            ]
     , testCase "i32 arithmetic through uint, wrapping as the IR defines it" $
         body ints
           @?= Right
@@ -239,7 +249,7 @@ tests =
             , "    }"
             ]
     , testCase "what it doesn't print yet: refused, a finding each" $
-        refused widened @?= Right ["Target: FuryKernel.Metal doesn't lower fragments widened into f32 yet. (in widened)"]
+        refused rowScaled @?= Right ["Target: FuryKernel.Metal doesn't lower fragments' rows scaled yet. (in row_scaled)"]
     , testCase "two kernels of one name refused, as the CPU backend refuses them" $ case check (rmsnorm 2816) of
         Left fs -> assertFailure (show fs)
         Right c -> case backendLower metal [c, c] of
@@ -434,6 +444,16 @@ tests =
             , "    const half q_1 = as_type<half>(fk_pack_q_0.y);"
             , "    reinterpret_cast<device fk_ushort2*>(d)[fk_thread.x] = ushort2(as_type<ushort>(q_0), as_type<ushort>(q_1));"
             ]
+    , testCase "f16 fragments widened into f32 a lane's elements at a time" $
+        body widenedF16
+          @?= Right
+            [ "    metal::simdgroup_matrix<half, 8, 8> h = metal::make_filled_simdgroup_matrix<half, 8, 8>(as_type<half>(ushort(0x0)));"
+            , "    metal::simdgroup_matrix<float, 8, 8> f = metal::make_filled_simdgroup_matrix<float, 8, 8>(0.0f);"
+            , "    metal::simdgroup_load(h, b + 0u, 8u);"
+            , "    f.thread_elements()[0] = static_cast<float>(h.thread_elements()[0]);"
+            , "    f.thread_elements()[1] = static_cast<float>(h.thread_elements()[1]);"
+            , "    metal::simdgroup_store(f, c + 0u, 8u);"
+            ]
     , testCase "comparisons, every operator, and false" $
         body cmp
           @?= Right
@@ -569,6 +589,23 @@ refused k = case check k of
   Right c -> case backendLower metal [c] of
     Left fs -> Right (map renderFinding fs)
     Right _ -> Left "lowered"
+
+-- | A fragment's rows scaled by a threadgroup array's elements, which the lanes write first.
+rowScaled :: Kernel AppleGPU9
+rowScaled = kernel "row_scaled" $ do
+  b <- buffer @ReadOnly @16 @Float "b" 64
+  c <- buffer @WriteOnly @16 @Float "c" 64
+  threads @32
+  groups 1
+  pure $ do
+    scales <- tgArray @8 @Float "scales"
+    pure $ do
+      whenLane (threadIndex .< 8) $ tgStore scales threadIndex (toF32 threadIndex * 0.5 + 1)
+      barrier
+      f <- fragment @Float "f"
+      fragLoad f b 0 8
+      fragScaleRows f scales 0
+      fragStore c 0 8 f
 
 -- | A bf16 fragment loaded, widened into an f32 one, stored.
 widened :: Kernel AppleGPU9
@@ -748,6 +785,20 @@ ints = kernel "ints" $ do
     store y 2 (a * b)
     store y 3 (negate a)
     store y 4 (abs a)
+
+-- | An f16 fragment loaded, widened into an f32 one, stored.
+widenedF16 :: Kernel AppleGPU9
+widenedF16 = kernel "widened_f16" $ do
+  b <- buffer @ReadOnly @16 @F16 "b" 64
+  c <- buffer @WriteOnly @16 @Float "c" 64
+  threads @32
+  groups 1
+  pure . pure $ do
+    h <- fragment @F16 "h"
+    f <- fragment @Float "f"
+    fragLoad h b 0 8
+    fragConvert f h
+    fragStore c 0 8 f
 
 -- | Packs of two 16-bit elements: bf16 reversed, f16 as they are.
 halves :: Kernel AppleGPU9
