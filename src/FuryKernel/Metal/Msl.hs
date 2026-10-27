@@ -122,11 +122,26 @@ What the printing fixes:
   (observed on macOS 27.2's compiler);
 * a parameter struct's size and each field's offset are asserted against
   the ABI's (@static_assert@), the layout runtimes fill it by;
-* a pack is one load or store of a @ushort@, @ushort2@, @uint@, @uint2@
-  or @uint4@ through the buffer's pointer (two 16-bit elements a
-  @ushort2@, which their half or bfloat accesses don't alias, unlike a
-  @uint@), its elements taken apart and put together
-  with 'as_type', so every element type and width lowers the same way;
+* a pack is one load or store of a @ushort@, @ushort2@ (two 16-bit
+  elements), @uint@, @uint2@ or @uint4@ through the buffer's pointer, its
+  elements taken apart and put together with @as_type@, so every element
+  type and width lowers the same way; a pack of four-byte elements stored
+  to a threadgroup array is stored as their own vector (@float2@,
+  @float4@, @int4@ and the like), narrower ones as words;
+* those words are named through typedefs that may alias every type
+  (@fk_uint4@ for @uint4@ and the like, declared with the @may_alias@
+  attribute), at every language version, where the kernel writes the
+  memory (a writable buffer, a threadgroup array, a table written
+  through), since a pack's memory is accessed as its elements' own type
+  too: as observed on macOS 27.2's compiler at MSL 4.1, type-based alias
+  analysis otherwise takes a @uint4@ access and a @float@ one, say, to be
+  of different objects, so that a pack reloaded after an element's store
+  reads the old value, as does an element reloaded after a pack's store
+  (at 3.1 it takes vectors, though not scalars, to alias every type; at
+  4.1 a vector of the elements' own type, as threadgroup memory's
+  four-byte packs are stored, aliases them). A pack of a buffer or table
+  the kernel only reads keeps the plain type: the IR's bindings never
+  overlap, so no store of the kernel's can touch that memory;
 * a table is a buffer of @ulong@ GPU addresses, each cast to a pointer to
   its arrays' element type where it is read;
 * a fragment is a @metal::simdgroup_matrix@ of 8×8, made zero with
@@ -138,9 +153,9 @@ What the printing fixes:
   observed on an M3 Max (AppleGPU9), half's not yet run.
 
 'metal' refuses what it doesn't print yet, a finding of the Target rule
-for each: packs stored to threadgroup arrays, SIMD-group barriers,
-fragments widened into f32, fragments' rows scaled, tables written through
-and fragments loaded or stored through tables.
+for each: SIMD-group barriers, fragments widened into f32, fragments' rows
+scaled, tables written through and fragments loaded or stored through
+tables.
 
 Buffers bind in declaration order from index 0, tables after them, the
 parameter struct last. The source is MSL 4.1, the floor: a language
@@ -212,16 +227,14 @@ refusals c =
  where
   k = checkedIR c
 
-{- | The constructs of a kernel this lowering doesn't print yet: packs
-stored to threadgroup arrays, SIMD-group barriers, fragments widened into
-f32, fragments' rows scaled, tables written through and fragments loaded
-or stored through tables.
+{- | The constructs of a kernel this lowering doesn't print yet:
+SIMD-group barriers, fragments widened into f32, fragments' rows scaled,
+tables written through and fragments loaded or stored through tables.
 -}
 notLowered :: IR.Kernel -> [Text]
 notLowered k = ["tables written through" | any ((/= ReadOnly) . (.tableAccess)) k.kernelTables] <> concatMap construct k.kernelBody
  where
   construct = \case
-    STgStorePack {} -> ["packs stored to threadgroup arrays"]
     SSimdBarrier -> ["SIMD-group barriers"]
     SFragLoad _ FVia {} _ _ _ -> ["fragments loaded or stored through tables"]
     SFragStore FVia {} _ _ _ -> ["fragments loaded or stored through tables"]
@@ -525,6 +538,19 @@ stmt depth = \case
     let p = packLayout t (length es)
     c <- aliased p.packContainer
     pure [pad <> "reinterpret_cast<device " <> c <> "*>(" <> b <> ")[" <> i' <> "] = " <> packValue p es' <> ";"]
+  STgStorePack a i es -> do
+    i' <- ex i
+    es' <- traverse exNative es
+    t <- gets (Map.findWithDefault TF32 a . (.envArrays))
+    -- Elements of four bytes go as their own vector, which the compiler
+    -- keeps in registers and takes to alias them; narrower ones as words.
+    let p = packLayout t (length es)
+        v = mslType t <> showT (length es)
+    (container, value) <-
+      if scalarSize t == 4
+        then pure (v, v <> "(" <> T.intercalate ", " es' <> ")")
+        else (,packValue p es') <$> aliased p.packContainer
+    pure [pad <> "reinterpret_cast<threadgroup " <> container <> "*>(" <> a <> ")[" <> i' <> "] = " <> value <> ";"]
   SIf _ c th el -> do
     c' <- ex c
     th' <- scoped (concat <$> traverse (stmt (depth + 1)) th)
@@ -561,7 +587,6 @@ stmt depth = \case
     pure [pad <> "metal::simdgroup_store(" <> n <> ", " <> memory m <> " + " <> i' <> ", " <> st' <> ");"]
   -- Refused before printing ('refusals').
   SStoreVia {} -> notPrinted
-  STgStorePack {} -> notPrinted
   SSimdBarrier -> notPrinted
   SFragConvert {} -> notPrinted
   SFragScaleRows {} -> notPrinted

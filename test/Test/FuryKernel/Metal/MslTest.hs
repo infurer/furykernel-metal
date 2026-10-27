@@ -176,6 +176,16 @@ tests =
             Right l -> do
               assertBool "the table's binding" ("    device const ulong* experts [[buffer(1)]]," `elem` T.lines l.loweredSource)
               map (\t -> (t.lkBindings, t.lkParamsBinding)) l.loweredKernels @?= [([("y", 0), ("experts", 1)], Just 2)]
+    , testCase "packs to threadgroup memory: the array aligned, a float4 each" $
+        body tgPacked
+          @?= Right
+            [ "    alignas(16) threadgroup float staged[1024];"
+            , "    alignas(16) threadgroup float plain[256];"
+            , "    reinterpret_cast<threadgroup float4*>(staged)[fk_thread.x] = float4(a[((fk_thread.x * 4u) + 0u)], a[((fk_thread.x * 4u) + 1u)], a[((fk_thread.x * 4u) + 2u)], a[((fk_thread.x * 4u) + 3u)]);"
+            , "    plain[fk_thread.x] = 0.0f;"
+            , "    metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);"
+            , "    b[fk_thread.x] = (staged[fk_thread.x] + plain[fk_thread.x]);"
+            ]
     , testCase "fragments: SIMD-group matrices, from device and threadgroup memory" $
         body staged
           @?= Right
@@ -228,7 +238,7 @@ tests =
             , "    }"
             ]
     , testCase "what it doesn't print yet: refused, a finding each" $
-        refused tgPacked @?= Right ["Target: FuryKernel.Metal doesn't lower packs stored to threadgroup arrays yet. (in tg_packed)"]
+        refused widened @?= Right ["Target: FuryKernel.Metal doesn't lower fragments widened into f32 yet. (in widened)"]
     , testCase "two kernels of one name refused, as the CPU backend refuses them" $ case check (rmsnorm 2816) of
         Left fs -> assertFailure (show fs)
         Right c -> case backendLower metal [c, c] of
@@ -475,7 +485,24 @@ tests =
             , "    g[(fk_thread.x + 32u)] = static_cast<half>((static_cast<float>(metal::fma(e, e, e)) * 2.0f) / (static_cast<float>(e) * 2.0f));"
             ]
     , testCase "threadgroup memory as the launch table reports it: each array's end rounded to 16 bytes" $
-        (.lkTgMemory) <$> launchTable tgSmall @?= Right 16
+        map (fmap (.lkTgMemory) . launchTable) [tgSmall, tgPacked] @?= map Right [16, 5120]
+    , testCase "a pack's container through a typedef that may alias, declared ahead of the kernels that use it" $
+        concat <$> traverse ahead [copies, halves, tgPackU8]
+          @?= Right
+            [ ""
+            , "typedef uint2 __attribute__((may_alias)) fk_uint2;"
+            , ""
+            , "typedef uint4 __attribute__((may_alias)) fk_uint4;"
+            , ""
+            , "typedef ushort __attribute__((may_alias)) fk_ushort;"
+            , ""
+            , ""
+            , "typedef ushort2 __attribute__((may_alias)) fk_ushort2;"
+            , ""
+            , ""
+            , "typedef uint __attribute__((may_alias)) fk_uint;"
+            , ""
+            ]
     , testCase "a pack loaded from a buffer the kernel also writes: not const" $
         body packRw
           @?= Right
@@ -485,6 +512,28 @@ tests =
             , "    const float v_2 = as_type<float>(fk_pack_v_0.z);"
             , "    const float v_3 = as_type<float>(fk_pack_v_0.w);"
             , "    reinterpret_cast<device fk_uint4*>(x)[fk_thread.x] = uint4(as_type<uint>(v_3), as_type<uint>(v_2), as_type<uint>(v_1), as_type<uint>(v_0));"
+            ]
+    , testCase "packs of 16-bit and 8-bit elements to threadgroup memory: as words" $
+        concat <$> traverse body [tgPackBf16, tgPackF16x2, tgPackU8]
+          @?= Right
+            [ "    alignas(16) threadgroup bfloat s[256];"
+            , "    reinterpret_cast<threadgroup fk_uint4*>(s)[fk_thread.x] = uint4(as_type<uint>(bfloat2(a[((fk_thread.x * 8u) + 0u)], a[((fk_thread.x * 8u) + 1u)])), as_type<uint>(bfloat2(a[((fk_thread.x * 8u) + 2u)], a[((fk_thread.x * 8u) + 3u)])), as_type<uint>(bfloat2(a[((fk_thread.x * 8u) + 4u)], a[((fk_thread.x * 8u) + 5u)])), as_type<uint>(bfloat2(a[((fk_thread.x * 8u) + 6u)], a[((fk_thread.x * 8u) + 7u)])));"
+            , "    metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);"
+            , "    for (uint i = fk_thread.x; i < 256u; i += 32u) {"
+            , "        b[i] = s[i];"
+            , "    }"
+            , "    alignas(16) threadgroup half s[64];"
+            , "    reinterpret_cast<threadgroup fk_ushort2*>(s)[fk_thread.x] = ushort2(as_type<ushort>(a[((fk_thread.x * 2u) + 1u)]), as_type<ushort>(a[(fk_thread.x * 2u)]));"
+            , "    metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);"
+            , "    for (uint i = fk_thread.x; i < 64u; i += 32u) {"
+            , "        b[i] = s[i];"
+            , "    }"
+            , "    alignas(16) threadgroup uchar s[128];"
+            , "    reinterpret_cast<threadgroup fk_uint*>(s)[fk_thread.x] = as_type<uint>(uchar4(a[((fk_thread.x * 4u) + 0u)], a[((fk_thread.x * 4u) + 1u)], a[((fk_thread.x * 4u) + 2u)], a[((fk_thread.x * 4u) + 3u)]));"
+            , "    metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);"
+            , "    for (uint i = fk_thread.x; i < 128u; i += 32u) {"
+            , "        b[i] = s[i];"
+            , "    }"
             ]
     ]
  where
@@ -519,6 +568,20 @@ refused k = case check k of
   Right c -> case backendLower metal [c] of
     Left fs -> Right (map renderFinding fs)
     Right _ -> Left "lowered"
+
+-- | A bf16 fragment loaded, widened into an f32 one, stored.
+widened :: Kernel AppleGPU9
+widened = kernel "widened" $ do
+  b <- buffer @ReadOnly @16 @BF16 "b" 64
+  c <- buffer @WriteOnly @16 @Float "c" 64
+  threads @32
+  groups 1
+  pure . pure $ do
+    h <- fragment @BF16 "h"
+    f <- fragment @Float "f"
+    fragLoad h b 0 8
+    fragConvert f h
+    fragStore c 0 8 f
 
 -- | Four elements a thread stored to threadgroup memory at once.
 tgPacked :: Kernel AppleGPU9
@@ -894,3 +957,45 @@ packRw = kernel "pack_rw" $ do
   pure . pure $ do
     v <- loadPack @4 "v" x threadIndex
     storePack @4 x threadIndex (reverse (unpack v))
+
+-- | Eight bfloat16s a lane stores to threadgroup memory at once: a uint4.
+tgPackBf16 :: Kernel AppleGPU9
+tgPackBf16 = kernel "tg_pack_bf16" $ do
+  a <- buffer @ReadOnly @16 @BF16 "a" 256
+  b <- buffer @WriteOnly @16 @BF16 "b" 256
+  threads @32
+  groups 1
+  pure $ do
+    s <- tgArray @256 @BF16 "s"
+    pure $ do
+      tgStorePack s threadIndex [load a (threadIndex * 8 + fromIntegral e) | e <- [0 .. 7 :: Int]]
+      barrier
+      strided "i" 256 $ \i -> store b i (tgLoad s i)
+
+-- | Two halves a lane stores to threadgroup memory at once, reversed: a ushort2.
+tgPackF16x2 :: Kernel AppleGPU9
+tgPackF16x2 = kernel "tg_pack_f16x2" $ do
+  a <- buffer @ReadOnly @16 @F16 "a" 64
+  b <- buffer @WriteOnly @16 @F16 "b" 64
+  threads @32
+  groups 1
+  pure $ do
+    s <- tgArray @64 @F16 "s"
+    pure $ do
+      tgStorePack s threadIndex [load a (threadIndex * 2 + 1), load a (threadIndex * 2)]
+      barrier
+      strided "i" 64 $ \i -> store b i (tgLoad s i)
+
+-- | Four u8s a lane stores to threadgroup memory at once: a uint.
+tgPackU8 :: Kernel AppleGPU9
+tgPackU8 = kernel "tg_pack_u8" $ do
+  a <- buffer @ReadOnly @16 @Word8 "a" 128
+  b <- buffer @WriteOnly @16 @Word8 "b" 128
+  threads @32
+  groups 1
+  pure $ do
+    s <- tgArray @128 @Word8 "s"
+    pure $ do
+      tgStorePack s threadIndex [load a (threadIndex * 4 + fromIntegral e) | e <- [0 .. 3 :: Int]]
+      barrier
+      strided "i" 128 $ \i -> store b i (tgLoad s i)
