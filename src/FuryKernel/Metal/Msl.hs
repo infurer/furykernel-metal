@@ -26,6 +26,8 @@ What the printing fixes:
 * SIMD-group sums are @metal::simd_sum@, which adds a group's lanes in
   the IR's order, pairwise, neighbours first, as observed on an M3 Max
   (AppleGPU9), MSL leaving the order unspecified;
+* a SIMD-group barrier is @metal::simdgroup_barrier@ over threadgroup
+  memory;
 * an integer narrows clamped with @metal::clamp@ or @metal::min@, or
   wrapped through @uint@ and @as_type@;
 * i32 addition, subtraction, multiplication, negation and magnitude go
@@ -153,9 +155,8 @@ What the printing fixes:
   observed on an M3 Max (AppleGPU9), half's not yet run.
 
 'metal' refuses what it doesn't print yet, a finding of the Target rule
-for each: SIMD-group barriers, fragments widened into f32, fragments' rows
-scaled, tables written through and fragments loaded or stored through
-tables.
+for each: fragments widened into f32, fragments' rows scaled, tables
+written through and fragments loaded or stored through tables.
 
 Buffers bind in declaration order from index 0, tables after them, the
 parameter struct last. The source is MSL 4.1, the floor: a language
@@ -227,15 +228,14 @@ refusals c =
  where
   k = checkedIR c
 
-{- | The constructs of a kernel this lowering doesn't print yet:
-SIMD-group barriers, fragments widened into f32, fragments' rows scaled,
-tables written through and fragments loaded or stored through tables.
+{- | The constructs of a kernel this lowering doesn't print yet: fragments
+widened into f32, fragments' rows scaled, tables written through and
+fragments loaded or stored through tables.
 -}
 notLowered :: IR.Kernel -> [Text]
 notLowered k = ["tables written through" | any ((/= ReadOnly) . (.tableAccess)) k.kernelTables] <> concatMap construct k.kernelBody
  where
   construct = \case
-    SSimdBarrier -> ["SIMD-group barriers"]
     SFragLoad _ FVia {} _ _ _ -> ["fragments loaded or stored through tables"]
     SFragStore FVia {} _ _ _ -> ["fragments loaded or stored through tables"]
     SFragConvert {} -> ["fragments widened into f32"]
@@ -570,6 +570,9 @@ stmt depth = \case
         <> body'
         <> [pad <> "}"]
   SBarrier -> pure [pad <> "metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);"]
+  -- Pinned by the goldens alone: on the M3 Max, whose SIMD groups seem to
+  -- run in lockstep, no run tells it from none.
+  SSimdBarrier -> pure [pad <> "metal::simdgroup_barrier(metal::mem_flags::mem_threadgroup);"]
   SSimd n op t e -> do
     s <- line ("const " <> mslType t <> " " <> n <> " = " <> simdFn op <> "(") e ");"
     declare n t
@@ -587,7 +590,6 @@ stmt depth = \case
     pure [pad <> "metal::simdgroup_store(" <> n <> ", " <> memory m <> " + " <> i' <> ", " <> st' <> ");"]
   -- Refused before printing ('refusals').
   SStoreVia {} -> notPrinted
-  SSimdBarrier -> notPrinted
   SFragConvert {} -> notPrinted
   SFragScaleRows {} -> notPrinted
  where

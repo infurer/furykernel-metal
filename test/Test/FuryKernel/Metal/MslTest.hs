@@ -176,13 +176,14 @@ tests =
             Right l -> do
               assertBool "the table's binding" ("    device const ulong* experts [[buffer(1)]]," `elem` T.lines l.loweredSource)
               map (\t -> (t.lkBindings, t.lkParamsBinding)) l.loweredKernels @?= [([("y", 0), ("experts", 1)], Just 2)]
-    , testCase "packs to threadgroup memory: the array aligned, a float4 each" $
+    , testCase "packs to threadgroup memory: the array aligned, a float4 each; SIMD-group barriers" $
         body tgPacked
           @?= Right
             [ "    alignas(16) threadgroup float staged[1024];"
             , "    alignas(16) threadgroup float plain[256];"
             , "    reinterpret_cast<threadgroup float4*>(staged)[fk_thread.x] = float4(a[((fk_thread.x * 4u) + 0u)], a[((fk_thread.x * 4u) + 1u)], a[((fk_thread.x * 4u) + 2u)], a[((fk_thread.x * 4u) + 3u)]);"
             , "    plain[fk_thread.x] = 0.0f;"
+            , "    metal::simdgroup_barrier(metal::mem_flags::mem_threadgroup);"
             , "    metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);"
             , "    b[fk_thread.x] = (staged[fk_thread.x] + plain[fk_thread.x]);"
             ]
@@ -596,6 +597,7 @@ tgPacked = kernel "tg_packed" $ do
     pure $ do
       tgStorePack packed threadIndex [load a (threadIndex * 4 + fromIntegral e) | e <- [0 .. 3 :: Int]]
       tgStore plain threadIndex 0
+      simdBarrier
       barrier
       store b threadIndex (tgLoad packed threadIndex + tgLoad plain threadIndex)
 

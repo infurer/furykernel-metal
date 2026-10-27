@@ -97,13 +97,23 @@ nix fmt && git diff --exit-code &&
     don't depend on the compile options' math mode, within the bounds of
     MSL 4.1's Table 8.1 (exp and log 4 ulp, tanh 5, sqrt, rsqrt and fma
     correctly rounded); binary16 math and division go through binary32,
-    rounding once more. A pack is one
-    `ushort`, `ushort2` (two 16-bit elements, which a `uint` would alias),
-    `uint`, `uint2` or `uint4` load or store through the
+    rounding once more. A pack is one `ushort`, `ushort2` (two 16-bit
+    elements), `uint`, `uint2` or `uint4` load or store through the
     buffer's pointer, taken apart and put together with `as_type`; a pack
     of four-byte elements stored to a threadgroup array is stored as their
     own vector (`float2`, `float4`, `int4` and the like; narrower ones as
-    words). A table
+    words). Where the kernel writes the memory (a writable buffer, a
+    threadgroup array, a table written through), those words are named
+    through typedefs that may alias every type (`typedef uint4 __attribute__((may_alias)) fk_uint4;` and the like), at every
+    language version: as observed on macOS 27.2's compiler at MSL 4.1,
+    type-based alias analysis otherwise takes a `uint4` access and a
+    `float` one, say, to be of different objects, so that a pack reloaded
+    after an element's store, or an element after a pack's, reads the old
+    value (at 3.1 it takes vectors, though not scalars, to alias every
+    type). A pack of memory the kernel only reads keeps the plain type:
+    bindings never overlap, so no store can touch it.
+    A SIMD-group barrier is `metal::simdgroup_barrier` over threadgroup
+    memory. A table
     is a `device const ulong*` of GPU addresses, each cast to a pointer
     where it is read. A fragment is a `metal::simdgroup_matrix` of 8×8,
     made zero, loaded and stored from a pointer to its first element with
@@ -145,8 +155,8 @@ nix fmt && git diff --exit-code &&
     narrows clamped with `metal::clamp` or `metal::min`, or wrapped
     through `uint` and `as_type`.
     It refuses what it doesn't print yet, a `Target` finding for each:
-    SIMD-group barriers, fragments widened into f32, fragments' rows scaled,
-    tables written through and fragments loaded or stored through tables.
+    fragments widened into f32, fragments' rows scaled, tables written
+    through and fragments loaded or stored through tables.
 - `test/`: the test suite, tasty: the limits of the targets, and golden MSL,
   the launch tables of an RMSNorm kernel and of a table's bindings with it,
   packs through ushort, ushort2, uint2 and uint4 and to threadgroup arrays
