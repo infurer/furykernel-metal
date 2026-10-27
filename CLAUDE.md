@@ -69,7 +69,7 @@ nix fmt && git diff --exit-code &&
   `furykernel-metal.nix` is cabal2nix's output, committed so that
   evaluation never builds anything first.
   - `FuryKernel.Metal.Target`: the GPU families, `AppleGPU9` (family 9) so
-    far, as `Target` instances.
+    far, as `Target` instances; its fragments are bfloat, half and float.
   - `FuryKernel.Metal.Msl`: `metal`, the backend: checked kernels of
     distinct names as one MSL 4.1 translation unit (two of one name are
     refused, as the CPU backend refuses them), which a runtime compiles as
@@ -102,8 +102,13 @@ nix fmt && git diff --exit-code &&
     `uint`, `uint2` or `uint4` load or store through the
     buffer's pointer, taken apart and put together with `as_type`. A table
     is a `device const ulong*` of GPU addresses, each cast to a pointer
-    where it is read. Buffers bind from 0 in declaration order, tables
-    after them, the parameter struct last.
+    where it is read. A fragment is a `metal::simdgroup_matrix` of 8×8,
+    made zero, loaded and stored from a pointer to its first element with
+    the stride as elements per row, and multiplied with
+    `simdgroup_multiply_accumulate`; the GPU adds a product's terms in an
+    order of its own, so such kernels match the interpreter to f32
+    accumulation's bound, not bit for bit. Buffers bind from 0 in
+    declaration order, tables after them, the parameter struct last.
     Every threadgroup array is declared `alignas(16)`, so Metal starts each
     at a multiple of 16 bytes; it allocates at most each one's size rounded
     up to 16, summed, the launch table's `lkTgMemory`: as observed on the
@@ -136,13 +141,14 @@ nix fmt && git diff --exit-code &&
     and Or evaluate both operands (`bool(int(a) & int(b))`); an integer
     narrows clamped with `metal::clamp` or `metal::min`, or wrapped
     through `uint` and `as_type`.
-    It refuses what it doesn't print yet, a `Target` finding for each:
-    fragments, packs stored to threadgroup arrays, SIMD-group barriers,
-    fragments widened into f32, fragments' rows scaled and tables written
-    through.
+    It refuses what it doesn't print yet, a `Target` finding for each: packs
+    stored to threadgroup arrays, SIMD-group barriers, fragments widened
+    into f32, fragments' rows scaled, tables written through and fragments
+    loaded or stored through tables.
 - `test/`: the test suite, tasty: the limits of the targets, and golden MSL,
   the launch tables of an RMSNorm kernel and of a table's bindings with it,
-  packs through ushort, ushort2, uint2 and uint4 and tables included.
+  packs through ushort, ushort2, uint2 and uint4, tables and fragments
+  included.
 - `nix/`: `package.nix` (the library, built with GHC 9.12 under
   `-Werror`), `checks.nix` (the build with its tests, hlint,
   cabal2nix-in-sync and `reuse lint`), `devshell.nix` (`checks.devshell`

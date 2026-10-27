@@ -1,8 +1,8 @@
 -- SPDX-FileCopyrightText: 2026 Mika Tammi
 -- SPDX-License-Identifier: BSD-3-Clause
 
-{- | The MSL of an RMSNorm kernel, of packs and of tables, golden, and the
-launch tables of the RMSNorm kernel and of a table's bindings.
+{- | The MSL of an RMSNorm kernel, of packs, tables and fragments, golden,
+and the launch tables of the RMSNorm kernel and of a table's bindings.
 -}
 module Test.FuryKernel.Metal.MslTest (tests) where
 
@@ -176,6 +176,25 @@ tests =
             Right l -> do
               assertBool "the table's binding" ("    device const ulong* experts [[buffer(1)]]," `elem` T.lines l.loweredSource)
               map (\t -> (t.lkBindings, t.lkParamsBinding)) l.loweredKernels @?= [([("y", 0), ("experts", 1)], Just 2)]
+    , testCase "fragments: SIMD-group matrices, from device and threadgroup memory" $
+        body staged
+          @?= Right
+            [ "    alignas(16) threadgroup bfloat tile[128];"
+            , "    const uint row0 = ((fk_simd_group / 2u) * 8u);"
+            , "    const uint col0 = ((fk_simd_group % 2u) * 8u);"
+            , "    metal::simdgroup_matrix<float, 8, 8> acc = metal::make_filled_simdgroup_matrix<float, 8, 8>(0.0f);"
+            , "    metal::simdgroup_matrix<bfloat, 8, 8> fa = metal::make_filled_simdgroup_matrix<bfloat, 8, 8>(as_type<bfloat>(ushort(0x0)));"
+            , "    metal::simdgroup_matrix<bfloat, 8, 8> fb = metal::make_filled_simdgroup_matrix<bfloat, 8, 8>(as_type<bfloat>(ushort(0x0)));"
+            , "    for (uint p = 0u; p < (fk_p.k / 8u); p += 1u) {"
+            , "        tile[fk_thread.x] = b[((((fk_thread.x / 8u) * fk_p.k) + (p * 8u)) + (fk_thread.x % 8u))];"
+            , "        metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);"
+            , "        metal::simdgroup_load(fa, a + ((row0 * fk_p.k) + (p * 8u)), fk_p.k);"
+            , "        metal::simdgroup_load(fb, tile + (col0 * 8u), 8u, ulong2(0, 0), true);"
+            , "        metal::simdgroup_multiply_accumulate(acc, fa, fb, acc);"
+            , "        metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);"
+            , "    }"
+            , "    metal::simdgroup_store(acc, c + ((row0 * 16u) + col0), 16u);"
+            ]
     , testCase "i32 arithmetic through uint, wrapping as the IR defines it" $
         body ints
           @?= Right
@@ -562,6 +581,35 @@ viaTable = kernel "via_table" $ do
     whenLane (threadIndex .== 0) $ do
       store y 0 (widen @Float (loadVia experts entry 3))
       store y 1 (widen @Float (last (unpack p)))
+
+{- | C = A · Bᵀ in 8×8 fragments, A and B 16 rows of k, B's tiles staged in
+threadgroup memory and loaded from there transposed, as in furykernel's
+tests.
+-}
+staged :: Kernel AppleGPU9
+staged = kernel "staged" $ do
+  k <- dim "k" (DimRange 8 256 8)
+  a <- buffer @ReadOnly @16 @BF16 "a" (16 * k)
+  b <- buffer @ReadOnly @16 @BF16 "b" (16 * k)
+  c <- buffer @WriteOnly @16 @Float "c" 256
+  threads @128
+  groups 1
+  pure $ do
+    tile <- tgArray @128 @BF16 "tile"
+    pure $ do
+      row0 <- let_ "row0" ((simdGroupIndex `quotE` 2) * 8)
+      col0 <- let_ "col0" ((simdGroupIndex `remE` 2) * 8)
+      acc <- fragment @Float "acc"
+      fa <- fragment @BF16 "fa"
+      fb <- fragment @BF16 "fb"
+      forU "p" 0 (k `quotE` 8) $ \p -> do
+        tgStore tile threadIndex (load b ((threadIndex `quotE` 8) * k + p * 8 + threadIndex `remE` 8))
+        barrier
+        fragLoad fa a (row0 * k + p * 8) k
+        fragLoadTgT fb tile (col0 * 8) 8
+        fragMma acc fa fb acc
+        barrier
+      fragStore c (row0 * 16 + col0) 16 acc
 
 -- | RMSNorm over rows of @hidden@ elements, as in furykernel's tests.
 rmsnorm :: Word32 -> Kernel AppleGPU9

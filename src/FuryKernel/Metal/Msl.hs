@@ -128,12 +128,19 @@ What the printing fixes:
   @uint@), its elements taken apart and put together
   with 'as_type', so every element type and width lowers the same way;
 * a table is a buffer of @ulong@ GPU addresses, each cast to a pointer to
-  its arrays' element type where it is read.
+  its arrays' element type where it is read;
+* a fragment is a @metal::simdgroup_matrix@ of 8×8, made zero with
+  @make_filled_simdgroup_matrix@, loaded and stored with @simdgroup_load@
+  and @simdgroup_store@ from a pointer to its first element, the stride as
+  the elements per row (a transposed load reads the block transposed), and
+  multiplied with @simdgroup_multiply_accumulate@, bfloat or half into
+  float, a product MSL documents for one element type only: bfloat's
+  observed on an M3 Max (AppleGPU9), half's not yet run.
 
 'metal' refuses what it doesn't print yet, a finding of the Target rule
-for each: fragments, packs stored to threadgroup arrays, SIMD-group
-barriers, fragments widened into f32, fragments' rows scaled and tables
-written through.
+for each: packs stored to threadgroup arrays, SIMD-group barriers,
+fragments widened into f32, fragments' rows scaled, tables written through
+and fragments loaded or stored through tables.
 
 Buffers bind in declaration order from index 0, tables after them, the
 parameter struct last. The source is MSL 4.1, the floor: a language
@@ -205,10 +212,10 @@ refusals c =
  where
   k = checkedIR c
 
-{- | The constructs of a kernel this lowering doesn't print yet:
-fragments, packs stored to threadgroup arrays, SIMD-group barriers,
-fragments widened into f32, fragments' rows scaled and tables written
-through.
+{- | The constructs of a kernel this lowering doesn't print yet: packs
+stored to threadgroup arrays, SIMD-group barriers, fragments widened into
+f32, fragments' rows scaled, tables written through and fragments loaded
+or stored through tables.
 -}
 notLowered :: IR.Kernel -> [Text]
 notLowered k = ["tables written through" | any ((/= ReadOnly) . (.tableAccess)) k.kernelTables] <> concatMap construct k.kernelBody
@@ -216,10 +223,8 @@ notLowered k = ["tables written through" | any ((/= ReadOnly) . (.tableAccess)) 
   construct = \case
     STgStorePack {} -> ["packs stored to threadgroup arrays"]
     SSimdBarrier -> ["SIMD-group barriers"]
-    SFragVar {} -> ["fragments"]
-    SFragLoad {} -> ["fragments"]
-    SFragMma {} -> ["fragments"]
-    SFragStore {} -> ["fragments"]
+    SFragLoad _ FVia {} _ _ _ -> ["fragments loaded or stored through tables"]
+    SFragStore FVia {} _ _ _ -> ["fragments loaded or stored through tables"]
     SFragConvert {} -> ["fragments widened into f32"]
     SFragScaleRows {} -> ["fragments' rows scaled"]
     SIf _ _ th el -> concatMap construct (th <> el)
@@ -543,18 +548,35 @@ stmt depth = \case
     s <- line ("const " <> mslType t <> " " <> n <> " = " <> simdFn op <> "(") e ");"
     declare n t
     pure s
+  SFragVar n t ->
+    pure [pad <> fragment t <> " " <> n <> " = metal::make_filled_simdgroup_matrix<" <> mslType t <> ", 8, 8>(" <> literal (zero t) <> ");"]
+  SFragLoad n m i st transposed -> do
+    i' <- ex i
+    st' <- ex st
+    pure [pad <> "metal::simdgroup_load(" <> n <> ", " <> memory m <> " + " <> i' <> ", " <> st' <> (if transposed then ", ulong2(0, 0), true" else "") <> ");"]
+  SFragMma d a b c -> pure [pad <> "metal::simdgroup_multiply_accumulate(" <> T.intercalate ", " [d, a, b, c] <> ");"]
+  SFragStore m i st n -> do
+    i' <- ex i
+    st' <- ex st
+    pure [pad <> "metal::simdgroup_store(" <> n <> ", " <> memory m <> " + " <> i' <> ", " <> st' <> ");"]
   -- Refused before printing ('refusals').
   SStoreVia {} -> notPrinted
   STgStorePack {} -> notPrinted
   SSimdBarrier -> notPrinted
-  SFragVar {} -> notPrinted
-  SFragLoad {} -> notPrinted
-  SFragMma {} -> notPrinted
   SFragConvert {} -> notPrinted
   SFragScaleRows {} -> notPrinted
-  SFragStore {} -> notPrinted
  where
   pad = T.replicate (4 * depth) " "
+  fragment t = "metal::simdgroup_matrix<" <> mslType t <> ", 8, 8>"
+  memory = \case
+    FDevice b -> b
+    FThreadgroup a -> a
+    -- Refused before printing ('refusals').
+    FVia {} -> notPrinted
+  zero = \case
+    TF16 -> LF16 0
+    TBF16 -> LBF16 0
+    _ -> LF32 0
   line prefix e suffix = do
     e' <- ex e
     pure [pad <> prefix <> e' <> suffix]

@@ -8,6 +8,7 @@ import FuryKernel.Constraint (checkTgTotal, checkThreads, withThreads)
 import FuryKernel.Finding (Finding (..), Rule (..))
 import FuryKernel.Metal (AppleGPU9)
 import FuryKernel.Target (TargetCaps (..), targetCaps)
+import FuryKernel.Type (ScalarType (..))
 import GHC.TypeNats (natVal)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
@@ -25,7 +26,7 @@ tests =
             , capTgMemBytes = 32768
             , capMaxBuffers = 31
             , capLaneLoadMax = 16
-            , capFragments = []
+            , capFragments = [TBF16, TF16, TF32]
             }
     , testCase "the rules, in AppleGPU9's words" $ do
         withThreads @AppleGPU9 1024 natVal @?= Right 1024
