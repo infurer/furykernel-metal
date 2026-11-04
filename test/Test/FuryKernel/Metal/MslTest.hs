@@ -1,8 +1,18 @@
 -- SPDX-FileCopyrightText: 2026 Mika Tammi
 -- SPDX-License-Identifier: BSD-3-Clause
 
-{- | The MSL of an RMSNorm kernel, of packs, tables and fragments, golden,
-and the launch tables of the RMSNorm kernel and of a table's bindings.
+{- | The lowering's output, golden: an RMSNorm kernel's translation unit,
+its prelude and helpers included, and the MSL of every construct the
+printing fixes: packs of every container, to and from buffers, tables and
+threadgroup memory, through the typedefs that may alias where the kernel
+writes; tables read and written through; fragments, widened and their
+rows scaled; SIMD-group barriers; i32 arithmetic through @uint@ and
+@fk_abs_i32@; integer narrowings, And and Or; select, minima and maxima;
+binary16 math and division through binary32; negations, magnitudes and
+Not; literals; comparisons; fma; types through nested expressions;
+signatures; kernels in name order. Then the launch tables of the RMSNorm
+kernel and of a table's bindings, threadgroup memory as they report it,
+and the refusal of two kernels of one name.
 -}
 module Test.FuryKernel.Metal.MslTest (tests) where
 
@@ -12,7 +22,7 @@ import Data.Word (Word32, Word8)
 import FuryKernel
 import FuryKernel.Abi qualified as Abi
 import FuryKernel.Backend (Backend (..), CompileOptions (..), Lowered (..), LoweredKernel (..), compileOptions)
-import FuryKernel.Finding (Finding (..), renderFinding)
+import FuryKernel.Finding (Finding (..))
 import FuryKernel.IR (Expr (..), Literal (..))
 import FuryKernel.Metal (AppleGPU9, metal, mslLanguage)
 import Test.Tasty (TestTree, testGroup)
@@ -176,6 +186,27 @@ tests =
             Right l -> do
               assertBool "the table's binding" ("    device const ulong* experts [[buffer(1)]]," `elem` T.lines l.loweredSource)
               map (\t -> (t.lkBindings, t.lkParamsBinding)) l.loweredKernels @?= [([("y", 0), ("experts", 1)], Just 2)]
+    , testCase "tables written through: each entry cast where it is stored to or read, const where the kernel only reads" $ do
+        body throughBlocks
+          @?= Right
+            [ "    const uint e = ids[fk_group.x];"
+            , "    ((device float*)(blocks[e]))[fk_thread.x] = (x[((fk_group.x * 64u) + fk_thread.x)] * 2.0f);"
+            , "    y[((fk_group.x * 64u) + fk_thread.x)] = ((device float*)(blocks[e]))[fk_thread.x];"
+            ]
+        body gemmVia
+          @?= Right
+            [ "    const uint row0 = ((fk_simd_group / 2u) * 8u);"
+            , "    const uint col0 = ((fk_simd_group % 2u) * 8u);"
+            , "    metal::simdgroup_matrix<float, 8, 8> acc = metal::make_filled_simdgroup_matrix<float, 8, 8>(0.0f);"
+            , "    metal::simdgroup_matrix<bfloat, 8, 8> fa = metal::make_filled_simdgroup_matrix<bfloat, 8, 8>(as_type<bfloat>(ushort(0x0)));"
+            , "    metal::simdgroup_matrix<bfloat, 8, 8> fb = metal::make_filled_simdgroup_matrix<bfloat, 8, 8>(as_type<bfloat>(ushort(0x0)));"
+            , "    for (uint p = 0u; p < (fk_p.k / 8u); p += 1u) {"
+            , "        metal::simdgroup_load(fa, ((device const bfloat*)(ab[1u])) + ((row0 * fk_p.k) + (p * 8u)), fk_p.k);"
+            , "        metal::simdgroup_load(fb, ((device const bfloat*)(ab[2u])) + ((col0 * fk_p.k) + (p * 8u)), fk_p.k, ulong2(0, 0), true);"
+            , "        metal::simdgroup_multiply_accumulate(acc, fa, fb, acc);"
+            , "    }"
+            , "    metal::simdgroup_store(acc, ((device float*)(cs[1u])) + ((row0 * 16u) + col0), 16u);"
+            ]
     , testCase "packs to threadgroup memory: the array aligned, a float4 each; SIMD-group barriers" $
         body tgPacked
           @?= Right
@@ -265,8 +296,6 @@ tests =
             , "        wu[fk_thread.x] = static_cast<uchar>(fk_p.b);"
             , "    }"
             ]
-    , testCase "what it doesn't print yet: refused, a finding each" $
-        refused throughBlocks @?= Right ["Target: FuryKernel.Metal doesn't lower tables written through yet. (in through_blocks)"]
     , testCase "two kernels of one name refused, as the CPU backend refuses them" $ case check (rmsnorm 2816) of
         Left fs -> assertFailure (show fs)
         Right c -> case backendLower metal [c, c] of
@@ -471,6 +500,36 @@ tests =
             , "    f.thread_elements()[1] = static_cast<float>(h.thread_elements()[1]);"
             , "    metal::simdgroup_store(f, c + 0u, 8u);"
             ]
+    , testCase "signatures: each access's constness, parameters of every type, a table written through" $
+        signature sigs
+          @?= Right
+            [ "struct fk_params_sigs {"
+            , "    int pi;"
+            , "    bool pb;"
+            , "    half ph;"
+            , "    char pc;"
+            , "    uint pu;"
+            , "};"
+            , "static_assert(sizeof(fk_params_sigs) == 16, \"fk_params_sigs: the ABI's size\");"
+            , "static_assert(__builtin_offsetof(fk_params_sigs, pi) == 0, \"fk_params_sigs.pi: the ABI's offset\");"
+            , "static_assert(__builtin_offsetof(fk_params_sigs, pb) == 4, \"fk_params_sigs.pb: the ABI's offset\");"
+            , "static_assert(__builtin_offsetof(fk_params_sigs, ph) == 6, \"fk_params_sigs.ph: the ABI's offset\");"
+            , "static_assert(__builtin_offsetof(fk_params_sigs, pc) == 8, \"fk_params_sigs.pc: the ABI's offset\");"
+            , "static_assert(__builtin_offsetof(fk_params_sigs, pu) == 12, \"fk_params_sigs.pu: the ABI's offset\");"
+            , ""
+            , "[[max_total_threads_per_threadgroup(32)]]"
+            , "kernel void sigs("
+            , "    device const float* r [[buffer(0)]],"
+            , "    device float* rw [[buffer(1)]],"
+            , "    device float* w [[buffer(2)]],"
+            , "    device char* wc [[buffer(3)]],"
+            , "    device const ulong* t [[buffer(4)]],"
+            , "    constant fk_params_sigs& fk_p [[buffer(5)]],"
+            , "    uint3 fk_thread [[thread_position_in_threadgroup]],"
+            , "    uint3 fk_group [[threadgroup_position_in_grid]],"
+            , "    uint fk_lane [[thread_index_in_simdgroup]],"
+            , "    uint fk_simd_group [[simdgroup_index_in_threadgroup]])"
+            ]
     , testCase "comparisons, every operator, and false" $
         body cmp
           @?= Right
@@ -573,6 +632,20 @@ tests =
             , "        b[i] = s[i];"
             , "    }"
             ]
+    , testCase "packs read and fragments loaded through a table the kernel also writes through: not const" $
+        concat <$> traverse body [tableRw, fragRw]
+          @?= Right
+            [ "    const uint4 fk_pack_p_0 = ((device fk_uint4*)(t[0u]))[fk_thread.x];"
+            , "    const float p_0 = as_type<float>(fk_pack_p_0.x);"
+            , "    const float p_1 = as_type<float>(fk_pack_p_0.y);"
+            , "    const float p_2 = as_type<float>(fk_pack_p_0.z);"
+            , "    const float p_3 = as_type<float>(fk_pack_p_0.w);"
+            , "    reinterpret_cast<device fk_uint4*>(y)[fk_thread.x] = uint4(as_type<uint>(p_0), as_type<uint>(p_1), as_type<uint>(p_2), as_type<uint>(p_3));"
+            , "    ((device float*)(t[1u]))[fk_thread.x] = 2.0f;"
+            , "    metal::simdgroup_matrix<float, 8, 8> f = metal::make_filled_simdgroup_matrix<float, 8, 8>(0.0f);"
+            , "    metal::simdgroup_load(f, ((device float*)(t[0u])) + 0u, 8u);"
+            , "    metal::simdgroup_store(f, ((device float*)(t[1u])) + 0u, 8u);"
+            ]
     ]
  where
   withLowered f = case check (rmsnorm 2816) of
@@ -591,6 +664,10 @@ lowered ks = case traverse check ks of
 unit :: [Kernel AppleGPU9] -> Either String [T.Text]
 unit ks = drop 4 . T.lines . (.loweredSource) <$> lowered ks
 
+-- | The lines of a kernel's source from its comment to its body's brace.
+signature :: Kernel AppleGPU9 -> Either String [T.Text]
+signature k = takeWhile (/= "{") . drop 1 . dropWhile (not . T.isPrefixOf "// ") . drop 4 . T.lines . (.loweredSource) <$> lowered [k]
+
 -- | The lines of a kernel's body, from its one translation unit.
 body :: Kernel AppleGPU9 -> Either String [T.Text]
 body k = case check k of
@@ -598,14 +675,6 @@ body k = case check k of
   Right c -> case backendLower metal [c] of
     Left fs -> Left (show fs)
     Right l -> Right (takeWhile (/= "}") (drop 1 (dropWhile (/= "{") (dropWhile (not . T.isPrefixOf "kernel void") (T.lines l.loweredSource)))))
-
--- | The findings 'metal' refuses a checked kernel with, rendered.
-refused :: Kernel AppleGPU9 -> Either String [T.Text]
-refused k = case check k of
-  Left fs -> Left (show fs)
-  Right c -> case backendLower metal [c] of
-    Left fs -> Right (map renderFinding fs)
-    Right _ -> Left "lowered"
 
 -- | A fragment's rows scaled by a threadgroup array's elements, which the lanes write first.
 rowScaled :: Kernel AppleGPU9
@@ -719,6 +788,29 @@ throughBlocks = kernel "through_blocks" $ do
     storeVia blocks e threadIndex (load x (groupIndex * 64 + threadIndex) * 2)
     store y (groupIndex * 64 + threadIndex) (loadVia blocks e threadIndex)
 
+{- | C = A · Bᵀ in 8×8 fragments through tables: A and B entries 1 and 2 of
+one, B's loaded transposed, and C stored to entry 1 of another.
+-}
+gemmVia :: Kernel AppleGPU9
+gemmVia = kernel "gemm_via" $ do
+  k <- dim "k" (DimRange 8 256 8)
+  ab <- table @16 @BF16 "ab" 3 (16 * k)
+  cs <- tableOf @WriteOnly @16 @Float "cs" 2 256
+  distinct cs
+  threads @128
+  groups 1
+  pure . pure $ do
+    row0 <- let_ "row0" ((simdGroupIndex `quotE` 2) * 8)
+    col0 <- let_ "col0" ((simdGroupIndex `remE` 2) * 8)
+    acc <- fragment @Float "acc"
+    fa <- fragment @BF16 "fa"
+    fb <- fragment @BF16 "fb"
+    forU "p" 0 (k `quotE` 8) $ \p -> do
+      fragLoadVia fa ab 1 (row0 * k + p * 8) k
+      fragLoadViaT fb ab 2 (col0 * k + p * 8) k
+      fragMma acc fa fb acc
+    fragStoreVia cs 1 (row0 * 16 + col0) 16 acc
+
 {- | C = A · Bᵀ in 8×8 fragments, A and B 16 rows of k, B's tiles staged in
 threadgroup memory and loaded from there transposed, as in furykernel's
 tests.
@@ -820,6 +912,28 @@ ints = kernel "ints" $ do
     store y 2 (a * b)
     store y 3 (negate a)
     store y 4 (abs a)
+
+-- | Buffers of each access, parameters of every type, a table written through.
+sigs :: Kernel AppleGPU9
+sigs = kernel "sigs" $ do
+  r <- buffer @ReadOnly @16 @Float "r" 32
+  rw <- buffer @ReadWrite @16 @Float "rw" 32
+  w <- buffer @WriteOnly @16 @Float "w" 32
+  t <- tableOf @WriteOnly @16 @Float "t" 2 32
+  distinct t
+  wc <- buffer @WriteOnly @16 @Int8 "wc" 32
+  pi' <- param @Int32 "pi"
+  pb <- param @Bool "pb"
+  ph <- param @F16 "ph"
+  pc <- param @Int8 "pc"
+  pu <- param @Word32 "pu"
+  threads @32
+  groups 1
+  pure . pure $ do
+    store rw threadIndex (load rw threadIndex + load r threadIndex)
+    store w threadIndex (select pb (widen @Float ph) (toF32 pu))
+    storeVia t 1 threadIndex (select (pi' .< 0) 1 0)
+    store wc threadIndex pc
 
 -- | An f16 fragment loaded, widened into an f32 one, stored.
 widenedF16 :: Kernel AppleGPU9
@@ -1087,3 +1201,28 @@ tgPackU8 = kernel "tg_pack_u8" $ do
       tgStorePack s threadIndex [load a (threadIndex * 4 + fromIntegral e) | e <- [0 .. 3 :: Int]]
       barrier
       strided "i" 128 $ \i -> store b i (tgLoad s i)
+
+-- | A pack read through a table the kernel also writes through.
+tableRw :: Kernel AppleGPU9
+tableRw = kernel "table_rw" $ do
+  t <- tableOf @ReadWrite @16 @Float "t" 2 128
+  distinct t
+  y <- buffer @WriteOnly @16 @Float "y" 128
+  threads @32
+  groups 1
+  pure . pure $ do
+    p <- loadPackVia @4 "p" t 0 threadIndex
+    storePack @4 y threadIndex (unpack p)
+    storeVia t 1 threadIndex 2
+
+-- | A fragment loaded through a table the kernel also stores it through.
+fragRw :: Kernel AppleGPU9
+fragRw = kernel "frag_rw" $ do
+  t <- tableOf @ReadWrite @16 @Float "t" 2 64
+  distinct t
+  threads @32
+  groups 1
+  pure . pure $ do
+    f <- fragment @Float "f"
+    fragLoadVia f t 0 0 8
+    fragStoreVia t 1 0 8 f

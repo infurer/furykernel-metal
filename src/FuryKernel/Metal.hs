@@ -32,7 +32,8 @@ with Metal at run time, and do what it leaves to them:
   parameter struct at 'lkParamsBinding', with @setBytes@ (up to 4 KB) or
   from a buffer at an offset that is a multiple of 4;
 * bind a table's buffer 8-byte aligned, and make the arrays its entries
-  point into resident (@useResource@);
+  point into resident (@useResource@, with @.write@ for a table written
+  through);
 * dispatch 'lkGroups' threadgroups of 'lkThreads' threads with
   @dispatchThreadgroups@, not @dispatchThreads@, whose grid needn't be a
   multiple of the threadgroup, and skip a launch whose grid comes to 0

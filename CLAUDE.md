@@ -122,7 +122,9 @@ nix fmt && git diff --exit-code &&
     `(lane / 4 & 4) + (lane / 2 % 4)`, and a bfloat or half fragment's
     element k where a float fragment's is). A table
     is a `device const ulong*` of GPU addresses, each cast to a pointer
-    where it is read. A fragment is a `metal::simdgroup_matrix` of 8×8,
+    where it is read or stored through, fragments loaded and stored
+    through it too; the pointer is `device const` where the kernel only
+    reads through the table. A fragment is a `metal::simdgroup_matrix` of 8×8,
     made zero, loaded and stored from a pointer to its first element with
     the stride as elements per row, and multiplied with
     `simdgroup_multiply_accumulate`; the GPU adds a product's terms in an
@@ -161,12 +163,14 @@ nix fmt && git diff --exit-code &&
     and Or evaluate both operands (`bool(int(a) & int(b))`); an integer
     narrows clamped with `metal::clamp` or `metal::min`, or wrapped
     through `uint` and `as_type`.
-    It refuses what it doesn't print yet, a `Target` finding for each:
-    tables written through and fragments loaded or stored through tables.
-- `test/`: the test suite, tasty: the limits of the targets, and golden MSL,
-  the launch tables of an RMSNorm kernel and of a table's bindings with it,
-  packs through ushort, ushort2, uint2 and uint4 and to threadgroup arrays
-  as float4, tables and fragments included.
+- `test/`: the test suite, tasty: the limits of the targets, and golden MSL
+  of an RMSNorm kernel's translation unit and of every construct the
+  printing fixes (packs of every container, through the typedefs that may
+  alias, to and from threadgroup memory; tables read and written through;
+  fragments; SIMD-group barriers; the arithmetic, conversions, literals
+  and comparisons; signatures and kernel order), the launch tables of the
+  RMSNorm kernel and of a table's bindings, threadgroup memory as they
+  report it, and the refusal of two kernels of one name.
 - `nix/`: `package.nix` (the library, built with GHC 9.12 under
   `-Werror`), `checks.nix` (the build with its tests, hlint,
   cabal2nix-in-sync and `reuse lint`), `devshell.nix` (`checks.devshell`

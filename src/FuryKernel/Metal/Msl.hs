@@ -145,7 +145,8 @@ What the printing fixes:
   the kernel only reads keeps the plain type: the IR's bindings never
   overlap, so no store of the kernel's can touch that memory;
 * a table is a buffer of @ulong@ GPU addresses, each cast to a pointer to
-  its arrays' element type where it is read;
+  its arrays' element type where it is read or stored through, fragments
+  loaded and stored through it too;
 * a fragment is a @metal::simdgroup_matrix@ of 8×8, made zero with
   @make_filled_simdgroup_matrix@, loaded and stored with @simdgroup_load@
   and @simdgroup_store@ from a pointer to its first element, the stride as
@@ -162,10 +163,6 @@ What the printing fixes:
   which MSL doesn't specify: a lane holds two elements of row
   @(lane / 4 & 4) + (lane / 2 % 4)@.
 
-'metal' refuses what it doesn't print yet, a finding of the Target rule
-for each: tables written through and fragments loaded or stored through
-tables.
-
 Buffers bind in declaration order from index 0, tables after them, the
 parameter struct last. The source is MSL 4.1, the floor: a language
 version is the operating system's, not the GPU's, and 4.1 is macOS 27's.
@@ -177,7 +174,6 @@ module FuryKernel.Metal.Msl (
 
 import Control.Applicative ((<|>))
 import Control.Monad.Trans.State.Strict (State, get, gets, modify', runState)
-import Data.Containers.ListUtils (nubOrd)
 import Data.Foldable (traverse_)
 import Data.List (sortOn)
 import Data.Map.Strict (Map)
@@ -191,7 +187,7 @@ import FuryKernel.Abi (abiOf, hex64, irHash)
 import FuryKernel.Abi qualified as Abi
 import FuryKernel.Backend (Backend (..), CompileOptions (..), Lowered (..), LoweredKernel (..), compileOptions)
 import FuryKernel.Check (Checked, checkedIR)
-import FuryKernel.Finding (Finding (..), Location (..), Rule (Names, Target), locatedAt)
+import FuryKernel.Finding (Finding (..), Rule (..))
 import FuryKernel.IR hiding (Kernel (..))
 import FuryKernel.IR qualified as IR
 import FuryKernel.Metal.Target (AppleGPU9)
@@ -212,7 +208,7 @@ metal :: Backend AppleGPU9
 metal =
   Backend
     { backendName = "metal"
-    , backendLower = \ks -> case repeats (map checkedIR ks) <> concatMap refusals ks of
+    , backendLower = \ks -> case repeats (map checkedIR ks) of
         [] -> Right (lower ks)
         findings -> Left findings
     }
@@ -224,36 +220,6 @@ repeats ks =
   | (n, c) <- Map.toList (Map.fromListWith (+) [(k.kernelName, 1 :: Int) | k <- ks])
   , c > 1
   ]
-
-{- | A finding for each construct of a kernel this lowering doesn't print
-yet ('notLowered').
--}
-refusals :: Checked t -> [Finding]
-refusals c =
-  [ locatedAt (Location k.kernelName []) (Finding Target ("FuryKernel.Metal doesn't lower " <> what <> " yet."))
-  | what <- nubOrd (notLowered k)
-  ]
- where
-  k = checkedIR c
-
-{- | The constructs of a kernel this lowering doesn't print yet: tables
-written through and fragments loaded or stored through tables.
--}
-notLowered :: IR.Kernel -> [Text]
-notLowered k = ["tables written through" | any ((/= ReadOnly) . (.tableAccess)) k.kernelTables] <> concatMap construct k.kernelBody
- where
-  construct = \case
-    SFragLoad _ FVia {} _ _ _ -> ["fragments loaded or stored through tables"]
-    SFragStore FVia {} _ _ _ -> ["fragments loaded or stored through tables"]
-    SIf _ _ th el -> concatMap construct (th <> el)
-    SFor _ _ _ _ _ body -> concatMap construct body
-    _ -> []
-
-{- | What the printer makes of a construct 'refusals' keeps from it: never
-reached.
--}
-notPrinted :: a
-notPrinted = error "FuryKernel.Metal.Msl: a construct refused before printing"
 
 lower :: [Checked t] -> Lowered
 lower ks =
@@ -432,6 +398,7 @@ data Env = Env
   , envArrays :: Map Name ScalarType
   , envAccess :: Map Name Access
   , envTables :: Map Name ScalarType
+  , envTableAccess :: Map Name Access
   , envHeld :: Set Name
   -- ^ The bf16 locals held as their bits.
   }
@@ -446,6 +413,7 @@ initialEnv k =
     , envArrays = Map.fromList [(a.tgName, a.tgType) | a <- k.kernelTgArrays]
     , envAccess = Map.fromList [(b.bufName, b.bufAccess) | b <- k.kernelBuffers]
     , envTables = Map.fromList [(t.tableName, t.tableType) | t <- k.kernelTables]
+    , envTableAccess = Map.fromList [(t.tableName, t.tableAccess) | t <- k.kernelTables]
     , envHeld = Set.empty
     }
 
@@ -511,6 +479,12 @@ stmt depth = \case
     i' <- ex i
     e' <- exNative e
     pure [pad <> b <> "[" <> i' <> "] = " <> e' <> ";"]
+  SStoreVia b e i v -> do
+    e' <- ex e
+    i' <- ex i
+    v' <- exNative v
+    t <- gets (Map.findWithDefault TF32 b . (.envTables))
+    pure [pad <> pointerVia ReadWrite (mslType t) b e' <> "[" <> i' <> "] = " <> v' <> ";"]
   STgStore a i e -> do
     i' <- ex i
     e' <- exNative e
@@ -529,10 +503,12 @@ stmt depth = \case
   SLoadPackVia ns t b e i -> do
     e' <- ex e
     i' <- ex i
+    access <- gets (Map.findWithDefault ReadOnly b . (.envTableAccess))
     traverse_ (`declare` t) ns
     let p = packLayout t (length ns)
         raw = "fk_pack_" <> T.concat (take 1 ns)
-        pointer = "((device const " <> p.packContainer <> "*)(" <> b <> "[" <> e' <> "]))"
+    c <- if access == ReadOnly then pure p.packContainer else aliased p.packContainer
+    let pointer = pointerVia access c b e'
     pure $
       [pad <> "const " <> p.packContainer <> " " <> raw <> " = " <> pointer <> "[" <> i' <> "];"]
         <> [pad <> "const " <> mslType t <> " " <> n <> " = " <> unpackElement p raw el <> ";" | (el, n) <- zip [0 ..] ns]
@@ -585,9 +561,10 @@ stmt depth = \case
   SFragVar n t ->
     pure [pad <> fragment t <> " " <> n <> " = metal::make_filled_simdgroup_matrix<" <> mslType t <> ", 8, 8>(" <> literal (zero t) <> ");"]
   SFragLoad n m i st transposed -> do
+    m' <- memory m
     i' <- ex i
     st' <- ex st
-    pure [pad <> "metal::simdgroup_load(" <> n <> ", " <> memory m <> " + " <> i' <> ", " <> st' <> (if transposed then ", ulong2(0, 0), true" else "") <> ");"]
+    pure [pad <> "metal::simdgroup_load(" <> n <> ", " <> m' <> " + " <> i' <> ", " <> st' <> (if transposed then ", ulong2(0, 0), true" else "") <> ");"]
   SFragMma d a b c -> pure [pad <> "metal::simdgroup_multiply_accumulate(" <> T.intercalate ", " [d, a, b, c] <> ");"]
   -- Apple's 8×8 layout: a lane holds two elements of one row, (lane / 4 &
   -- 4) + (lane / 2 % 4).
@@ -603,19 +580,23 @@ stmt depth = \case
   -- A lane's elements of the one, converted into the same of the other.
   SFragConvert d s -> pure [pad <> d <> ".thread_elements()[" <> e <> "] = static_cast<float>(" <> s <> ".thread_elements()[" <> e <> "]);" | e <- ["0", "1"]]
   SFragStore m i st n -> do
+    m' <- memory m
     i' <- ex i
     st' <- ex st
-    pure [pad <> "metal::simdgroup_store(" <> n <> ", " <> memory m <> " + " <> i' <> ", " <> st' <> ");"]
-  -- Refused before printing ('refusals').
-  SStoreVia {} -> notPrinted
+    pure [pad <> "metal::simdgroup_store(" <> n <> ", " <> m' <> " + " <> i' <> ", " <> st' <> ");"]
  where
   pad = T.replicate (4 * depth) " "
   fragment t = "metal::simdgroup_matrix<" <> mslType t <> ", 8, 8>"
+  -- A fragment's memory: a buffer, a threadgroup array, or the array a
+  -- table's entry points at.
   memory = \case
-    FDevice b -> b
-    FThreadgroup a -> a
-    -- Refused before printing ('refusals').
-    FVia {} -> notPrinted
+    FDevice b -> pure b
+    FThreadgroup a -> pure a
+    FVia b e -> do
+      e' <- ex e
+      t <- gets (Map.findWithDefault TF32 b . (.envTables))
+      access <- gets (Map.findWithDefault ReadOnly b . (.envTableAccess))
+      pure (pointerVia access (mslType t) b e')
   zero = \case
     TF16 -> LF16 0
     TBF16 -> LBF16 0
@@ -756,7 +737,7 @@ expr env = go
     ENarrowInt o t e -> narrowInt o t (go e)
     ELoad n i -> n <> "[" <> go i <> "]"
     ELoadVia n e i ->
-      "((device const " <> mslType (Map.findWithDefault TF32 n env.envTables) <> "*)(" <> n <> "[" <> go e <> "]))[" <> go i <> "]"
+      pointerVia (Map.findWithDefault ReadOnly n env.envTableAccess) (mslType (Map.findWithDefault TF32 n env.envTables)) n (go e) <> "[" <> go i <> "]"
     ETgLoad n i -> n <> "[" <> go i <> "]"
   bitsOf x = if held env x then go x else "as_type<ushort>(" <> go x <> ")"
 
@@ -784,6 +765,12 @@ widenBits t u = if t == TF32 then f else "static_cast<" <> mslType t <> ">(" <> 
 -- | Whether a narrowing to bf16 goes through @fk_bf16@: every one does.
 byBits :: Env -> Expr -> Bool
 byBits _ _ = True
+
+{- | Entry @e@ of a table as a pointer to @ty@: const where the kernel only
+reads through the table.
+-}
+pointerVia :: Access -> Text -> Name -> Text -> Text
+pointerVia access ty t e = "((device " <> (if access == ReadOnly then "const " else "") <> ty <> "*)(" <> t <> "[" <> e <> "]))"
 
 {- | An integer narrowed: clamped to the narrower range, or its low bits,
 an i32 through @uint@ and @as_type@ so that it wraps as the IR says.
