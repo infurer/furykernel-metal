@@ -71,12 +71,13 @@ nix fmt && git diff --exit-code &&
   builds its shell), `pins.nix` (`nix run .#check-pins`) and `treefmt.nix`
   (`nix fmt` and `checks.treefmt`).
 - `.gitlab-ci.yml`: GitLab CI on x86_64-linux runners. `checks` runs
-  `nix flake check --all-systems`, which builds x86_64-linux's checks;
-  `pins` runs `nix run .#check-pins` (`nix/pins.nix`): every input of ours
-  locked at a commit on GitHub master, so that it fails until a branch's
-  dependencies are merged, published and locked there; `publish-github`,
-  on master once those passed, pushes master, and the tags it holds, to
-  the public GitHub repository.
+  `nix flake check --all-systems`, which builds x86_64-linux's checks, and
+  builds the packages of x86_64-linux and aarch64-linux, whose tests run in
+  their checkPhase; `pins` runs `nix run .#check-pins` (`nix/pins.nix`):
+  every input of ours locked at a commit on GitHub master, so that it fails
+  until a branch's dependencies are merged, published and locked there;
+  `publish-github`, on master once those passed, pushes master, and the
+  tags it holds, to the public GitHub repository.
 
 ## Conventions
 

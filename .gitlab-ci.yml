@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Mika Tammi
 # SPDX-License-Identifier: BSD-3-Clause
 #
-# GitLab CI on x86_64-linux runners: the flake's checks, the inputs' pins,
-# and on master a push to the public GitHub repository.
+# GitLab CI on x86_64-linux runners: the flake's checks and its packages,
+# the inputs' pins, and on master a push to the public GitHub repository.
 stages:
   - ci
   - publish
@@ -13,6 +13,10 @@ checks:
   interruptible: true
   script:
     - nix flake check --all-systems --no-update-lock-file -L
+    # The packages, listed by hand: x86_64-linux's is checks.build, which
+    # the line above built; aarch64-linux's builds on its remote builder.
+    # Their tests run in checkPhase.
+    - nix build --no-link --no-update-lock-file -L .#packages.x86_64-linux.furykernel-metal .#packages.aarch64-linux.furykernel-metal
 # Every input of ours locked at a commit on GitHub master: it fails until a
 # branch's dependencies are merged, published and locked there, so that a
 # merge waits for them.
