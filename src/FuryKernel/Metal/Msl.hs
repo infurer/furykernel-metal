@@ -25,9 +25,16 @@ What the printing fixes:
   evaluated;
 * SIMD-group sums are @metal::simd_sum@, which adds a group's lanes in
   the IR's order, pairwise, neighbours first, as observed on an M3 Max
-  (AppleGPU9), MSL leaving the order unspecified;
+  (AppleGPU9), MSL leaving the order unspecified. An explicit butterfly
+  of @metal::simd_shuffle_xor@ would put the order in the source, with
+  the same bits there, but was slower (by 0.47 % in a model's decoding at
+  batch 1), so the order stays an observation, which the conformance run
+  guards: a reversed or a sequential order fails its @flow@, @simd_sums@
+  and @sum_rows@ cases;
 * a SIMD-group barrier is @metal::simdgroup_barrier@ over threadgroup
-  memory;
+  memory, which only the golden tests pin: on the M3 Max, whose SIMD
+  groups seem to run in lockstep, the conformance run passes with every
+  one removed;
 * an integer narrows clamped with @metal::clamp@ or @metal::min@, or
   wrapped through @uint@ and @as_type@;
 * i32 addition, subtraction, multiplication, negation and magnitude go
@@ -624,8 +631,10 @@ stmt depth = \case
     env <- get
     pure (if held env e then e' else "as_type<ushort>(" <> e' <> ")")
   -- Metal's own: simd_sum adds pairwise, neighbours first, as the IR orders
-  -- a reduction (bit for bit on the M3 Max, in f32 and f16); simd_max and
-  -- simd_min as metal::fmax and fmin.
+  -- a reduction (bit for bit on the M3 Max, in f32 and f16), which the
+  -- corpus's flow, simd_sums and sum_rows cases guard; an explicit xor
+  -- butterfly gives the same bits but was slower. simd_max and simd_min
+  -- as metal::fmax and fmin.
   simdFn = \case
     SimdSum -> "metal::simd_sum"
     SimdMax -> "metal::simd_max"

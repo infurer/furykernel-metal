@@ -20,9 +20,12 @@ those tables and the core's `FuryKernel.Emit.Rust`. The GPU lowering of
 FuryKernel programs into launch schedules is planned. It depends only on
 the core library, furykernel.
 
-It never runs anything on a GPU: it emits MSL source, which the consuming
-runtime compiles with Metal at run time. So it builds and is tested on any
-system, and golden tests pin its output.
+The library never runs anything on a GPU itself: it emits MSL source,
+which the consuming runtime compiles with Metal at run time, on macOS 27
+or later. So it builds and is tested on any system, and golden tests pin
+its output; the GPU conformance run (`test/gpu/`) runs that output on an
+Apple9 Mac's GPU. What the repository records of Metal's behaviour was
+observed on one M3 Max, under macOS 27.2.
 
 Like the core, it knows no models: model kernels live with the runtime that
 runs them.
@@ -34,6 +37,7 @@ nix develop                # GHC, cabal, ghcid, hlint, cabal2nix, reuse
 cabal build                # inside the dev shell
 nix fmt
 nix flake check --all-systems --no-update-lock-file
+nix run .#gpu-conformance  # on an Apple9 Mac: the corpus on its GPU
 ```
 
 After changing `furykernel-metal.cabal`, regenerate `furykernel-metal.nix`:
@@ -57,6 +61,11 @@ nix fmt && git diff --exit-code &&
     done
   )
 ```
+
+The GPU conformance run needs an Apple9 GPU, so it is no check and runs
+outside CI: before a merge request, on an Apple9 Mac, with every case
+passing, and again on each new GPU or macOS, as `FuryKernel.Metal` asks
+of runtimes.
 
 ## Architecture
 
@@ -85,19 +94,32 @@ nix fmt && git diff --exit-code &&
     (`static_assert`). The IR leaves binary32 subnormals to the target, and
     MSL 4.1's section 8.1 lets them be flushed to zero; on the M3 Max,
     float arithmetic flushes subnormal operands and results to zeros of
-    their signs, comparisons see them as zeros, and so do fmin, fmax and
-    select's condition, which return operands unflushed, simd_max over
-    subnormal lanes gives lane 0's, loads, stores, bfloat's widening and
-    tanh keep the bits, and half keeps its subnormals. A converted NaN is
-    the target's too: on the M3 Max, bfloat's widening keeps a signalling
-    NaN signalling, half's widening and float's narrowing give the
-    canonical NaN, and no NaN becomes an infinity. Library calls are
-    fully qualified and generated names start with `fk_`; floats print
-    exactly; transcendental functions are `metal::precise::`, so results
-    don't depend on the compile options' math mode, within the bounds of
-    MSL 4.1's Table 8.1 (exp and log 4 ulp, tanh 5, sqrt, rsqrt and fma
-    correctly rounded); binary16 math and division go through binary32,
-    rounding once more. A pack is one `ushort`, `ushort2` (two 16-bit
+    their signs (fma's results tiny before rounding too), comparisons see
+    them as zeros, and so do fmin, fmax and select's condition, which
+    return operands unflushed, simd_max over subnormal lanes gives lane
+    0's, loads, stores, bfloat's widening and tanh keep the bits, and half
+    keeps its subnormals, as the IR requires, though MSL lets them be
+    flushed too: the target meets the IR there by observation alone. A
+    converted NaN is the target's too: on the M3 Max, bfloat's widening
+    keeps a signalling NaN signalling, half's widening and float's
+    narrowing to half give the canonical NaN, and no NaN becomes an
+    infinity (the narrowing to bfloat, by bits, quiets a NaN, keeping its
+    sign and the top of its payload).
+    Library calls are fully qualified and generated names start with
+    `fk_`; floats print exactly; transcendental functions are
+    `metal::precise::`, so results don't depend on the compile options'
+    math mode, within the bounds of MSL 4.1's Table 8.1 (exp and log 4
+    ulp, tanh 5, sqrt, rsqrt and fma correctly rounded); binary16 math and
+    division go through binary32, rounding once more. Where macOS 27.2's
+    compiler miscompiled the printing's MSL, the printing works around it,
+    and `test/gpu/` holds each one's repro: a bf16 value a select, a var or
+    a literal gives is held as its bits (a `ushort`), and every narrowing
+    to bf16 goes through `fk_bf16`, by bits; u32 division by a divisor
+    that isn't a literal goes through `fk_udiv` and `fk_urem`; binary16
+    division doubles its operands first; float's sqrt and rsqrt, and
+    float's narrowing to half, take their operands through `fk_keep`. A
+    half select goes on its bits, which Metal's default options would make
+    an fmin. A pack is one `ushort`, `ushort2` (two 16-bit
     elements), `uint`, `uint2` or `uint4` load or store through the
     buffer's pointer, taken apart and put together with `as_type`; a pack
     of four-byte elements stored to a threadgroup array is stored as their
@@ -159,7 +181,11 @@ nix fmt && git diff --exit-code &&
     0's); what they choose among equal lanes, -0 and +0, or NaNs isn't.
     SIMD-group sums are `metal::simd_sum`, which adds pairwise, neighbours
     first, as the IR orders them (bit for bit on the M3 Max, in f32 away
-    from binary32 subnormals, which it flushes, and in f16). And
+    from binary32 subnormals, which it flushes, and in f16). It stays
+    native: an explicit `simd_shuffle_xor` butterfly gives the same bits
+    but was slower (by 0.47 % in a model's decoding at batch 1), so the
+    order rests on the observation, which the corpus guards (a reversed or
+    sequential order fails `flow`, `simd_sums` and `sum_rows`). And
     and Or evaluate both operands (`bool(int(a) & int(b))`); an integer
     narrows clamped with `metal::clamp` or `metal::min`, or wrapped
     through `uint` and `as_type`.
@@ -171,11 +197,40 @@ nix fmt && git diff --exit-code &&
   and comparisons; signatures and kernel order), the launch tables of the
   RMSNorm kernel and of a table's bindings, threadgroup memory as they
   report it, and the refusal of two kernels of one name.
+- `test/gpu/`: the GPU conformance run (`apps.gpu-conformance`).
+  `Cases.hs` writes its corpus: the core's checks.cpu kernels, the core's
+  test kernels and this library's own constructs (every pack container
+  against element accesses and threadgroup memory, SIMD-group barriers,
+  the target's limits, every binary16 and bfloat16), each lowered by
+  `metal`, with the interpreter's inputs and outputs, each run twice with
+  its write-only arrays poisoned (0xff and 0x5a bytes), and a rule for each
+  output, the IR's leave there: arithmetic's NaNs by class (quiet or
+  signalling), conversions', minima's and maxima's whole; binary32
+  subnormals as signed zeros where the IR lets a target flush them (an
+  interpreter run on flushed inputs, parameters and literals), results
+  tiny before rounding that round to the least normal too, an operand
+  returned unflushed; either zero from minima and maxima; MSL's ulp bounds
+  for exp, log and tanh; products of fragments within (k + 2) · 2^-24 of
+  the sum of their products' magnitudes and the least normal. The runner,
+  Rust on objc2-metal, refuses a GPU outside family Apple9, compiles each
+  case with the lowered options, checks its pipeline (threads, SIMD width,
+  threadgroup memory at most the launch table's where Metal doesn't
+  validate it), binds, dispatches and compares, failing a case on anything
+  the command buffer logged; the comparison is unit-tested
+  (`checks.gpu-runner-tests`). It
+  runs three times: as a runtime runs it, under shader validation (whose
+  invalid loads and stores only the logs report), and with Metal's
+  default options (`--default-options`, fast math), so that the source's
+  pragmas and precise functions must hold; and it prints the GPU, macOS
+  and the compiler.
 - `nix/`: `package.nix` (the library, built with GHC 9.12 under
   `-Werror`), `checks.nix` (the build with its tests, hlint,
   cabal2nix-in-sync and `reuse lint`), `devshell.nix` (`checks.devshell`
-  builds its shell), `pins.nix` (`nix run .#check-pins`) and `treefmt.nix`
-  (`nix fmt` and `checks.treefmt`).
+  builds its shell), `pins.nix` (`nix run .#check-pins`), `rust.nix`
+  (crane and the Rust toolchain for the runner, and rustfmt), `gpu.nix`
+  (the corpus, `checks.gpu-corpus` on every system; the runner, the app,
+  `checks.gpu-runner-clippy` and `checks.gpu-runner-tests` on
+  aarch64-darwin) and `treefmt.nix` (`nix fmt` and `checks.treefmt`).
 - `.gitlab-ci.yml`: GitLab CI on x86_64-linux runners. `checks` runs
   `nix flake check --all-systems`, which builds x86_64-linux's checks, and
   builds the packages of x86_64-linux and aarch64-linux, whose tests run in

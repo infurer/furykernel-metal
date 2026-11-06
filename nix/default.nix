@@ -4,8 +4,10 @@
   imports = [
     ./checks.nix
     ./devshell.nix
+    ./gpu.nix
     ./package.nix
     ./pins.nix
+    ./rust.nix
     ./treefmt.nix
   ];
 }

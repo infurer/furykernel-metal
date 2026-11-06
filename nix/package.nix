@@ -33,7 +33,8 @@
         ../README.md
         ../furykernel-metal.cabal
         ../src
-        ../test
+        # The GPU run is no part of the library's build.
+        (lib.fileset.difference ../test ../test/gpu)
       ];
     };
 
