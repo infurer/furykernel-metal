@@ -38,17 +38,22 @@ publish-github:
   rules:
     - if: '$CI_COMMIT_BRANCH == "master"'
   script:
-    - install -d -m700 "$HOME/.github-mirror"
-    - printf '%s' "$GITHUB_DEPLOY_KEY_B64" | base64 -d > "$HOME/.github-mirror/key"
-    - chmod 600 "$HOME/.github-mirror/key"
+    # The key's directory, the job's own, in case a home is ever shared:
+    # resource_group orders only this project's publish jobs.
+    - key_dir="$HOME/.github-mirror-$CI_PROJECT_ID-$CI_JOB_ID"
+    - install -d -m700 "$key_dir"
+    - printf '%s' "$GITHUB_DEPLOY_KEY_B64" | base64 -d > "$key_dir/key"
+    - chmod 600 "$key_dir/key"
     # GitHub's published ed25519 host key; refresh it from
     # https://api.github.com/meta.
-    - echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$HOME/.github-mirror/known_hosts"
+    - echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$key_dir/known_hosts"
     # The runner fetches only the pipeline's ref: without this, there are
-    # no tags, and --tags below pushes none.
-    - git fetch --no-recurse-submodules origin '+refs/tags/*:refs/tags/*'
-    # refs/heads/ spelled out: the runner pushes a detached HEAD, at first
+    # no tags to push. --prune drops the tags GitLab no longer has, in case
+    # a checkout is ever reused.
+    - git fetch --prune --no-recurse-submodules origin '+refs/tags/*:refs/tags/*'
+    # Master and the tags it holds, no other branch's. refs/heads/ and
+    # refs/tags/ spelled out: the runner pushes a detached HEAD, at first
     # into an empty repository, so git can infer neither side's ref type.
-    - git -c core.sshCommand="ssh -i $HOME/.github-mirror/key -o IdentitiesOnly=yes -o UserKnownHostsFile=$HOME/.github-mirror/known_hosts -o StrictHostKeyChecking=yes" push "$GITHUB_REMOTE" HEAD:refs/heads/master --tags
+    - git -c core.sshCommand="ssh -i $key_dir/key -o IdentitiesOnly=yes -o UserKnownHostsFile=$key_dir/known_hosts -o StrictHostKeyChecking=yes" push "$GITHUB_REMOTE" HEAD:refs/heads/master $(git tag --merged HEAD | sed 's|.*|refs/tags/&:refs/tags/&|')
   after_script:
-    - rm -rf "$HOME/.github-mirror"
+    - rm -rf "$HOME/.github-mirror-$CI_PROJECT_ID-$CI_JOB_ID"

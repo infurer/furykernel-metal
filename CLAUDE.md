@@ -75,8 +75,8 @@ nix fmt && git diff --exit-code &&
   `pins` runs `nix run .#check-pins` (`nix/pins.nix`): every input of ours
   locked at a commit on GitHub master, so that it fails until a branch's
   dependencies are merged, published and locked there; `publish-github`,
-  on master once those passed, pushes master to the public GitHub
-  repository.
+  on master once those passed, pushes master, and the tags it holds, to
+  the public GitHub repository.
 
 ## Conventions
 
