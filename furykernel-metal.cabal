@@ -14,6 +14,7 @@ description:
   runtimes compile it with Metal.
 
 homepage: https://github.com/infurer/furykernel-metal
+bug-reports: https://github.com/infurer/furykernel-metal/issues
 license: BSD-3-Clause
 license-file: LICENSES/BSD-3-Clause.txt
 author: Mika Tammi
@@ -21,9 +22,18 @@ maintainer: mikatammi@gmail.com
 copyright: 2026 Mika Tammi
 category: Compilers/Interpreters
 build-type: Simple
-extra-doc-files: README.md
+extra-doc-files:
+  CHANGELOG.md
+  README.md
+
 tested-with: ghc ==9.12.3
 
+source-repository head
+  type: git
+  location: https://github.com/infurer/furykernel-metal.git
+
+-- -Wmissing-home-modules: a module the .cabal file doesn't list stays out
+-- of the source tarball Hackage gets, so the build refuses one.
 common warnings
   ghc-options:
     -Wall
@@ -32,6 +42,7 @@ common warnings
     -Wincomplete-uni-patterns
     -Wpartial-fields
     -Wmissing-export-lists
+    -Wmissing-home-modules
 
 common extensions
   default-language: GHC2024
@@ -49,8 +60,11 @@ library
     FuryKernel.Metal.Msl
     FuryKernel.Metal.Target
 
+  -- Bounds by the PVP, below each dependency's next major version, and
+  -- stated once: the test suite shares the library's. base stays below
+  -- 4.22 until a newer GHC than 9.12 is tested.
   build-depends:
-    base >=4.21 && <5,
+    base >=4.21 && <4.22,
     containers >=0.7 && <0.8,
     furykernel >=0.2 && <0.3,
     text >=2.1 && <2.2,

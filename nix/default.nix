@@ -7,6 +7,7 @@
     ./gpu.nix
     ./package.nix
     ./pins.nix
+    ./release.nix
     ./rust.nix
     ./treefmt.nix
   ];
