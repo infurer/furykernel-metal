@@ -30,6 +30,7 @@
       root = ../.;
       fileset = lib.fileset.unions [
         ../LICENSES
+        ../CHANGELOG.md
         ../README.md
         ../furykernel-metal.cabal
         ../src
