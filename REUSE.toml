@@ -1,0 +1,22 @@
+version = 1
+SPDX-PackageName = "furykernel-metal"
+SPDX-PackageSupplier = "Mika Tammi <mikatammi@gmail.com>"
+SPDX-PackageDownloadLocation = "https://github.com/infurer/furykernel-metal"
+
+# Files that cannot carry an SPDX comment themselves.
+
+[[annotations]]
+path = "flake.lock"
+SPDX-FileCopyrightText = "2026 Mika Tammi"
+SPDX-License-Identifier = "BSD-3-Clause"
+
+[[annotations]]
+path = "test/gpu/Cargo.lock"
+SPDX-FileCopyrightText = "2026 Mika Tammi"
+SPDX-License-Identifier = "BSD-3-Clause"
+
+# cabal2nix's output; checks.cabal2nix-in-sync compares it with a fresh run.
+[[annotations]]
+path = "furykernel-metal.nix"
+SPDX-FileCopyrightText = "2026 Mika Tammi"
+SPDX-License-Identifier = "BSD-3-Clause"

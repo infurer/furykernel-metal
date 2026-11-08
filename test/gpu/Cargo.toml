@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 Mika Tammi
+# SPDX-License-Identifier: BSD-3-Clause
+
+# The GPU conformance run (apps.gpu-conformance): the corpus Cases.hs
+# writes, launched through Metal on this Mac's GPU and compared with the
+# interpreter's outputs.
+[package]
+name = "furykernel-metal-gpu-conformance"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-metal = "0.3"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
